@@ -6,9 +6,9 @@ It allows Android devices and Meta Quest headsets to share the internet connecti
 
 > [!TIP]
 > ### Primarily Focused on VR Headsets & Continuous Wired Play
-> This edition is specifically engineered for **standalone and PCVR headsets** (such as **Meta Quest 2, Quest 3, Quest Pro**, and **Pico** devices).
+> This edition is specifically engineered for standalone and PCVR headsets (such as Meta Quest 2, Quest 3, Quest Pro, and Pico devices).
 >
-> Generic reverse tether tools frequently crash, lock ports, or freeze on batch-file pauses whenever you take off your headset, let it sleep, or experience a Link cable wiggle. **Gnirehtet Continued** eliminates this frustration with automatic link self-healing, zero-touch APK installation, and resilient ADB reverse tunnel supervision for an uninterrupted wired VR experience.
+> Because of this, it is tuned for continuous high-bandwidth traffic.
 
 ---
 
