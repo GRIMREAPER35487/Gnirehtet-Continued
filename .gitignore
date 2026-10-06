@@ -1,5 +1,13 @@
 build/
 .gradle/
+.cxx/
 .idea/
 *.iml
 /local.properties
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+Thumbs.db

@@ -20,6 +20,8 @@ import java.nio.ByteBuffer;
 
 public interface TransportHeader {
 
+    void wrap(ByteBuffer raw);
+
     int getSourcePort();
 
     int getDestinationPort();

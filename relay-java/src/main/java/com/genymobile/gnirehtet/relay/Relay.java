@@ -27,17 +27,27 @@ public class Relay {
 
     private static final int CLEANING_INTERVAL = 60 * 1000;
 
+    public interface RelayListener {
+        void onClientDisconnected();
+    }
+
     private final int port;
+    private final RelayListener listener;
 
     public Relay(int port) {
+        this(port, null);
+    }
+
+    public Relay(int port, RelayListener listener) {
         this.port = port;
+        this.listener = listener;
     }
 
     public void run() throws IOException {
         Selector selector = Selector.open();
 
         // will register the socket on the selector
-        TunnelServer tunnelServer = new TunnelServer(port, selector);
+        TunnelServer tunnelServer = new TunnelServer(port, selector, listener);
 
         Log.i(TAG, "Relay server started");
 

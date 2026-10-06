@@ -1,0 +1,27 @@
+Gnirehtet Continued by Synthos
+Copyright (C) 2026 Synthos
+
+This product includes software originally developed by Genymobile (https://www.genymobile.com/).
+Original repository: https://github.com/Genymobile/gnirehtet
+Copyright (C) 2017 Genymobile
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Summary of Major Modifications:
+- Added resilient auto-recovery supervisor and watchdog (gnirehtet_watchdog.py, run_watchdog.cmd, run_watchdog.sh).
+- Added dynamic discovery of Java and ADB binaries across platforms without hardcoded paths.
+- Added automatic provisioning and installation of gnirehtet.apk on newly connected devices.
+- Added low-latency ZGC memory optimizations for modern JVMs (Java 15+).
+- Added in-headset audio status cues and VRChat OSC chatbox link notifications.
+- Modernized relay-java build system with Gradle 9.1 and Java 21/25 compilation support.
+- Streamlined project structure to focus on the high-performance Java relay server.

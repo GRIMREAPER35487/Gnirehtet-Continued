@@ -47,6 +47,8 @@ public final class RelayTunnel implements Tunnel {
 
     public void connect() throws IOException {
         localSocket.connect(new LocalSocketAddress(LOCAL_ABSTRACT_NAME));
+        localSocket.setReceiveBufferSize(2 * 1024 * 1024);
+        localSocket.setSendBufferSize(2 * 1024 * 1024);
         readClientId(localSocket.getInputStream());
     }
 
@@ -82,10 +84,10 @@ public final class RelayTunnel implements Tunnel {
     }
 
     @Override
-    public int receive(byte[] packet) throws IOException {
-        int r = localSocket.getInputStream().read(packet);
+    public int receiveTo(byte[] buffer, int offset, int maxLen) throws IOException {
+        int r = localSocket.getInputStream().read(buffer, offset, maxLen);
         if (GnirehtetService.VERBOSE) {
-            Log.v(TAG, "Receiving packet: " + Binary.buildPacketString(packet, r));
+            Log.v(TAG, "Receiving packet: " + r + " bytes");
         }
         return r;
     }

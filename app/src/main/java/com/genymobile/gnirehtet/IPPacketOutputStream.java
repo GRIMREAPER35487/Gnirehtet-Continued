@@ -78,6 +78,22 @@ public class IPPacketOutputStream extends OutputStream {
         buffer.compact();
     }
 
+    public int readFrom(Tunnel source) throws IOException {
+        int position = buffer.position();
+        int remaining = buffer.remaining();
+        if (remaining == 0) {
+            throw new IOException("IPPacketOutputStream buffer is full");
+        }
+        int r = source.receiveTo(buffer.array(), buffer.arrayOffset() + position, remaining);
+        if (r > 0) {
+            buffer.position(position + r);
+            buffer.flip();
+            sink();
+            buffer.compact();
+        }
+        return r;
+    }
+
     private void sink() throws IOException {
         // sink all packets
         while (sinkPacket()) {
