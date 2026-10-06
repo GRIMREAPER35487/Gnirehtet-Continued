@@ -1,8 +1,6 @@
 # Gnirehtet Continued by Synthos
 
-A high-performance, resilient **reverse tethering** supervisor over ADB for Android and Meta Quest VR headsets.
-
-It allows Android devices and Meta Quest headsets to share the internet connection of the computer they are connected to over USB. It requires **no root access** on the device or computer.
+Reverse tethering over ADB for Android devices and Meta Quest headsets. Allows your device to use your computer's internet connection over USB without root access.
 
 > [!TIP]
 > ### Primarily Focused on VR Headsets & Continuous Wired Play
@@ -12,52 +10,56 @@ It allows Android devices and Meta Quest headsets to share the internet connecti
 
 ---
 
-## What's New in this Continued Edition
+## Changes in This Fork
 
-This edition enhances the original project with a dedicated auto-recovery supervisor and optimizations tailored for Meta Quest headsets and continuous wired VR:
-
-* **Resilient Auto-Recovery:** Eliminates the classic batch file freezes when cables wiggle or headsets sleep. The supervisor automatically detects disconnects and re-establishes the reverse tether the moment the device reconnects.
-* **Auto-Provisioning Client APK:** Automatically detects whether the Gnirehtet VPN app is installed on the connected device and seamlessly installs `gnirehtet.apk` on first run.
-* **Modern Java & Low-Latency ZGC:** Built and verified on modern Java runtimes (Java 17, 21, and 25). Automatically enables low-latency ZGC garbage collection (`-XX:+UseZGC`) on modern JVMs to eliminate latency spikes.
-* **Dynamic Environment Discovery:** Automatically locates your ADB tools and Java installations across standard locations without any hardcoded paths or environment setup required.
-* **Cross-Platform Launchers:** Simple one-click launchers for both Windows (`run_watchdog.cmd`) and Linux/macOS (`run_watchdog.sh`).
+* **Automatic Link Recovery:** Standard batch scripts stop or hang when an ADB connection breaks. A Python supervisor (`gnirehtet_watchdog.py`) monitors device state, cleans up stale tunnels when the device sleeps or disconnects, and restores the reverse tether the moment it reconnects.
+* **Java Relay Only:** The legacy Rust relay was removed in favor of the Java NIO implementation, which handles sudden socket drops without leaking port bindings or locking threads.
+* **Automatic APK Installation:** Checks for the `com.genymobile.gnirehtet` package on connect and installs `gnirehtet.apk` automatically if it is not present.
+* **Modern Java & ZGC:** Updated to build on modern JDKs (up to Java 25). Automatically applies `-XX:+UseZGC` when available to keep GC pauses minimal under heavy traffic.
+* **Automatic Tool Discovery:** Finds `adb` and `java` in standard system paths (Android SDK, JDK installs, PATH) without requiring manual configuration.
+* **Simple Launchers:** Includes `run_watchdog.cmd` for Windows and `run_watchdog.sh` for Linux/macOS.
 
 ---
 
-## Why Java Over Rust for ADB Reverse Tethering?
+## Why Java Over Rust?
 
-The original Genymobile project historically offered both Java and native Rust implementations. While Rust produces small native binaries, in practice for **continuous ADB reverse tethering (especially wired VR / Meta Quest use), the Java relay proved significantly more resilient**:
+Upstream Gnirehtet offered both Java and Rust versions of the desktop relay. For continuous tethering, especially with VR headsets, the Java relay proved more reliable:
 
-1. **Superior Socket Recovery & Zero Zombie States:**  
-   ADB reverse tunnels (`localabstract:gnirehtet -> tcp:31416`) are prone to sudden socket resets, broken pipes, and transport hangs when USB cables wiggle or headsets sleep. In native Rust (`mio`), abrupt disconnects frequently caused thread lockups or zombie socket states where port 31416 remained bound but unresponsive. The Java NIO implementation handles per-client socket disconnects cleanly, resetting client state without taking down or corrupting the listening socket.
+1. **Clean Socket Teardown:**  
+   ADB reverse tunnels (`localabstract:gnirehtet -> tcp:31416`) frequently encounter broken pipes and reset events when a headset sleeps or the cable moves. In the Rust relay, abrupt disconnects could leave port 31416 stuck in a bound zombie state. The Java NIO relay handles client disconnections cleanly without affecting the listening server socket.
 
-2. **Sub-Millisecond Latency with Modern ZGC:**  
-   Historical concerns with Java centered around garbage collection pauses. On modern runtimes (Java 17, 21, and 25), the **Z Garbage Collector (`-XX:+UseZGC`)** keeps GC pauses sub-millisecond, eliminating micro-stutters and delivering rock-solid network throughput for high-bandwidth VR streaming.
+2. **Garbage Collection (ZGC):**  
+   Modern runtimes (Java 17+) provide the Z Garbage Collector (`-XX:+UseZGC`), which keeps pause times below a millisecond even under sustained high network throughput.
 
-3. **Bulletproof Cross-Platform Stability:**  
-   A single compiled JAR executes identically across Windows 10/11, Linux, and macOS without the compiler variances, C-runtime dependencies, or MinGW cross-compilation quirks of native binaries.
+3. **Portability:**  
+   A single compiled JAR runs across Windows, Linux, and macOS without native binary dependencies or compiler toolchain differences.
 
 ---
 
 ## Quick Start
 
-### 1. Requirements
-* **Computer:** Windows, Linux, or macOS with **Python 3** and **Java 8 or higher** (JDK 17, 21, or 25 recommended).
-* **ADB:** [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) (`adb.exe` on PATH or in standard SDK directory).
+### Requirements
+* **Computer:** Windows, Linux, or macOS with **Python 3** and **Java 8+** (Java 17+ recommended).
+* **ADB:** [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) installed and in your `PATH` or standard SDK directory.
 * **Device:** Android 5.0+ or Meta Quest with **USB debugging enabled**.
 
-### 2. Launching
+### Running
 
-* **Windows:** Double-click `run_watchdog.cmd` (or run `.\run_watchdog.cmd` in PowerShell/CMD).
+* **Windows:** Run `run_watchdog.cmd` (or double-click it).
 * **Linux / macOS:** Run `./run_watchdog.sh`.
 
-The supervisor will automatically start the Java relay server, wait for your headset or phone to connect, install the client APK if needed, and activate the reverse tether.
+The supervisor will:
+1. Start the Java relay server (`gnirehtet.jar`).
+2. Wait for a device over ADB.
+3. Install `gnirehtet.apk` if missing.
+4. Set up the ADB reverse tunnel and start the VPN service.
+5. Monitor link health and recover automatically if the connection drops.
 
 ---
 
 ## Command-Line Options
 
-You can pass arguments directly to the supervisor script or through the launcher:
+Arguments can be passed to `run_watchdog.cmd` / `run_watchdog.sh` or directly to `gnirehtet_watchdog.py`:
 
 ```text
 usage: gnirehtet_watchdog.py [-h] [-s SERIAL] [-p PORT] [--adb ADB]
@@ -85,7 +87,7 @@ Example:
 ## Building from Source
 
 ### Java Relay (`relay-java`)
-The desktop relay server is powered by **Gradle 9.1** and supports compiling under modern JDKs (JDK 21 or 25 recommended):
+Requires JDK 17, 21, or 25:
 
 ```powershell
 cd relay-java
@@ -93,10 +95,10 @@ cd relay-java
 ```
 *(On Linux/macOS: `./gradlew assembleRelease`)*
 
-This produces the updated relay binary in `relay-java/build/libs/gnirehtet.jar`.
+The output JAR is generated at `relay-java/build/libs/gnirehtet.jar`.
 
 ### Android Client (`app`)
-The Android APK can be compiled using Android Studio or via the Gradle wrapper with the Android SDK installed:
+Can be built using Android Studio or the root Gradle wrapper with the Android SDK and NDK installed:
 
 ```powershell
 .\gradlew.bat assembleRelease
@@ -106,7 +108,7 @@ The Android APK can be compiled using Android Studio or via the Gradle wrapper w
 
 ## License & Attribution
 
-This project is licensed under the **Apache License, Version 2.0**. See the [LICENSE](LICENSE) and [NOTICE](NOTICE) files for details.
+This project is licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
 
 * **Original Author:** [Genymobile](https://www.genymobile.com/) ([Original Repository](https://github.com/Genymobile/gnirehtet)), Copyright (C) 2017 Genymobile.
 * **Continuation & Modifications:** Copyright (C) 2026 Synthos.
