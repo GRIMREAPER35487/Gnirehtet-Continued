@@ -21,6 +21,21 @@ This edition enhances the original project with a dedicated auto-recovery superv
 
 ---
 
+## Why Java Over Rust for ADB Reverse Tethering?
+
+The original Genymobile project historically offered both Java and native Rust implementations. While Rust produces small native binaries, in practice for **continuous ADB reverse tethering (especially wired VR / Meta Quest use), the Java relay proved significantly more resilient**:
+
+1. **Superior Socket Recovery & Zero Zombie States:**  
+   ADB reverse tunnels (`localabstract:gnirehtet -> tcp:31416`) are prone to sudden socket resets, broken pipes, and transport hangs when USB cables wiggle or headsets sleep. In native Rust (`mio`), abrupt disconnects frequently caused thread lockups or zombie socket states where port 31416 remained bound but unresponsive. The Java NIO implementation handles per-client socket disconnects cleanly, resetting client state without taking down or corrupting the listening socket.
+
+2. **Sub-Millisecond Latency with Modern ZGC:**  
+   Historical concerns with Java centered around garbage collection pauses. On modern runtimes (Java 17, 21, and 25), the **Z Garbage Collector (`-XX:+UseZGC`)** keeps GC pauses sub-millisecond, eliminating micro-stutters and delivering rock-solid network throughput for high-bandwidth VR streaming.
+
+3. **Bulletproof Cross-Platform Stability:**  
+   A single compiled JAR executes identically across Windows 10/11, Linux, and macOS without the compiler variances, C-runtime dependencies, or MinGW cross-compilation quirks of native binaries.
+
+---
+
 ## Quick Start
 
 ### 1. Requirements
