@@ -39,7 +39,7 @@ Upstream Gnirehtet offered both Java and Rust versions of the desktop relay. We 
 ## Quick Start
 
 ### Requirements
-* **Computer:** Windows, Linux, or macOS with **Python 3** and **Java 8+** (Java 17+ recommended).
+* **Computer:** Windows, Linux, or macOS with **Python 3** and **Java 17+** (Java 21 or 25 recommended for low-latency ZGC).
 * **ADB:** [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) installed and in your `PATH` or standard SDK directory.
 * **Device:** Android 5.0+ or Meta Quest with **USB debugging enabled**.
 
