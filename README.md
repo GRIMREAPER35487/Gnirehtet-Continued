@@ -1,5 +1,7 @@
 # Gnirehtet Continued by Synthos
 
+[![Build & Release](https://github.com/GRIMREAPER35487/Gnirehtet-Continued/actions/workflows/build.yml/badge.svg)](https://github.com/GRIMREAPER35487/Gnirehtet-Continued/actions/workflows/build.yml)
+
 Reverse tethering over ADB for Android devices and Meta Quest headsets. Allows your device to use your computer's internet connection over USB without root access.
 
 > [!TIP]
@@ -26,7 +28,7 @@ Reverse tethering over ADB for Android devices and Meta Quest headsets. Allows y
 Upstream Gnirehtet offered both Java and Rust versions of the desktop relay. For continuous tethering, especially with VR headsets, the Java relay proved more reliable:
 
 1. **Clean Socket Teardown:**  
-   ADB reverse tunnels (`localabstract:gnirehtet -> tcp:31416`) frequently encounter broken pipes and reset events when a headset sleeps or the cable moves. In the Rust relay, abrupt disconnects could leave port 31416 stuck in a bound zombie state. The Java NIO relay handles client disconnections cleanly without affecting the listening server socket.
+   Reverse ADB pipes themselves can be an issue: tunnels (`localabstract:gnirehtet -> tcp:31416`) frequently encounter broken pipes, transport stalls, and reset events when a headset sleeps or the cable moves. In the Rust relay, abrupt disconnects could leave port 31416 stuck in a bound zombie state. The Java NIO relay handles client disconnections cleanly without affecting the listening server socket.
 
 2. **Garbage Collection (ZGC):**  
    Modern runtimes (Java 17+) provide the Z Garbage Collector (`-XX:+UseZGC`), which keeps pause times below a millisecond even under sustained high network throughput.

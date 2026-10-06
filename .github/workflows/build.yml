@@ -1,0 +1,134 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-relay:
+    name: Build Java Relay
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Compile relay-java with Gradle 9.1
+        run: |
+          chmod +x relay-java/gradlew
+          cd relay-java
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Upload gnirehtet.jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnirehtet-jar
+          path: relay-java/build/libs/gnirehtet.jar
+
+  build-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Install Android SDK Platform 28 & Build Tools
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-28" "build-tools;28.0.3"
+
+      - name: Compile Android Client
+        id: compile_apk
+        continue-on-error: true
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Locate and prepare APK
+        run: |
+          if [ -f "app/build/outputs/apk/release/gnirehtet-release.apk" ]; then
+            cp app/build/outputs/apk/release/gnirehtet-release.apk gnirehtet.apk
+          elif [ -f "app/build/outputs/apk/release/gnirehtet.apk" ]; then
+            cp app/build/outputs/apk/release/gnirehtet.apk gnirehtet.apk
+          fi
+
+      - name: Upload gnirehtet.apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnirehtet-apk
+          path: gnirehtet.apk
+
+  package:
+    name: Package Release Bundle
+    needs: [build-relay, build-apk]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download relay jar
+        uses: actions/download-artifact@v4
+        with:
+          name: gnirehtet-jar
+          path: dist-jar
+
+      - name: Download android apk
+        uses: actions/download-artifact@v4
+        with:
+          name: gnirehtet-apk
+          path: dist-apk
+
+      - name: Prepare distribution bundle
+        run: |
+          mkdir -p bundle
+          cp dist-jar/gnirehtet.jar bundle/gnirehtet.jar
+          cp dist-apk/gnirehtet.apk bundle/gnirehtet.apk
+          cp gnirehtet_watchdog.py bundle/
+          cp run_watchdog.cmd bundle/
+          cp run_watchdog.sh bundle/
+          chmod +x bundle/run_watchdog.sh
+          cp README.md bundle/
+          cp LICENSE bundle/
+          cp NOTICE bundle/
+
+          VERSION="${GITHUB_REF_NAME:-latest}"
+          ZIP_NAME="gnirehtet-continued-${VERSION}.zip"
+          cd bundle
+          zip -r "../${ZIP_NAME}" *
+          cd ..
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Upload release zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ZIP_NAME }}
+            bundle/gnirehtet.apk
+            bundle/gnirehtet.jar
+          generate_release_notes: true
