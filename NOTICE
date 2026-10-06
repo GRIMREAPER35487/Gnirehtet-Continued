@@ -22,6 +22,6 @@ Summary of Major Modifications:
 - Added dynamic discovery of Java and ADB binaries across platforms without hardcoded paths.
 - Added automatic provisioning and installation of gnirehtet.apk on newly connected devices.
 - Added low-latency ZGC memory optimizations for modern JVMs (Java 15+).
-- Added in-headset audio status cues and VRChat OSC chatbox link notifications.
+- Added VRChat OSC disconnect notice handling in Java relay server.
 - Modernized relay-java build system with Gradle 9.1 and Java 21/25 compilation support.
 - Streamlined project structure to focus on the high-performance Java relay server.

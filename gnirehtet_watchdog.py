@@ -31,16 +31,8 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-try:
-    import winsound
-    HAS_WINSOUND = True
-except ImportError:
-    HAS_WINSOUND = False
-
 # Default configurations
 DEFAULT_PORT = 31416
-DEFAULT_OSC_IP = "127.0.0.1"
-DEFAULT_OSC_PORT = 9000
 DEFAULT_POLL_INTERVAL = 1.0
 ADB_TIMEOUT_SEC = 4.0
 
@@ -77,51 +69,6 @@ def log_error(msg: str):
     print(f"[{timestamp}] {Colors.RED}{Colors.BOLD}[ERROR]{Colors.RESET} {msg}")
 
 
-def play_sound_disconnect(enabled: bool = True):
-    if not enabled:
-        return
-    if HAS_WINSOUND:
-        try:
-            winsound.Beep(440, 200)
-        except Exception:
-            pass
-    else:
-        sys.stdout.write("\a")
-        sys.stdout.flush()
-
-
-def play_sound_connect(enabled: bool = True):
-    if not enabled:
-        return
-    if HAS_WINSOUND:
-        try:
-            winsound.Beep(700, 100)
-            winsound.Beep(950, 150)
-        except Exception:
-            pass
-    else:
-        sys.stdout.write("\a")
-        sys.stdout.flush()
-
-
-def send_vrchat_osc(message: str, ip: str = DEFAULT_OSC_IP, port: int = DEFAULT_OSC_PORT, enabled: bool = True):
-    """Sends an OSC chatbox message to VRChat via local UDP port (default 9000)."""
-    if not enabled:
-        return
-    try:
-        addr = b"/chatbox/input\x00\x00"
-        tags = b",sTT\x00\x00\x00\x00"
-        msg_bytes = message.encode("utf-8") + b"\x00"
-        pad = (4 - (len(msg_bytes) % 4)) % 4
-        packet = addr + tags + msg_bytes + (b"\x00" * pad)
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(packet, (ip, port))
-        sock.close()
-    except Exception:
-        pass
-
-
 def find_java(explicit_path: Optional[str] = None) -> str:
     """Dynamically locates a Java runtime without hardcoded user paths."""
     if explicit_path and os.path.isfile(explicit_path):
@@ -153,7 +100,6 @@ def find_java(explicit_path: Optional[str] = None) -> str:
         for pat in search_patterns:
             candidates.extend(glob.glob(pat))
         if candidates:
-            # Pick the newest / highest version found
             candidates.sort(reverse=True)
             return candidates[0]
 
@@ -223,7 +169,6 @@ def get_java_major_version(java_bin: str) -> Optional[int]:
     try:
         res = subprocess.run([java_bin, "-version"], capture_output=True, text=True, timeout=3)
         output = res.stderr or res.stdout
-        # Example versions: "25.0.2", "17.0.1", "1.8.0_292"
         match = re.search(r'version "(?:1\.)?(\d+)', output)
         if match:
             return int(match.group(1))
@@ -254,10 +199,6 @@ class GnirehtetSupervisor:
         java_path: Optional[str] = None,
         jar_path: Optional[str] = None,
         jvm_args: Optional[List[str]] = None,
-        enable_sound: bool = True,
-        enable_osc: bool = True,
-        osc_ip: str = DEFAULT_OSC_IP,
-        osc_port: int = DEFAULT_OSC_PORT,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
     ):
         self.port = port
@@ -266,10 +207,6 @@ class GnirehtetSupervisor:
         self.java = find_java(java_path)
         self.jar = find_jar(jar_path)
         self.jvm_args = jvm_args if jvm_args is not None else get_default_jvm_args(self.java)
-        self.enable_sound = enable_sound
-        self.enable_osc = enable_osc
-        self.osc_ip = osc_ip
-        self.osc_port = osc_port
         self.poll_interval = poll_interval
 
         self.relay_process: Optional[subprocess.Popen] = None
@@ -397,14 +334,14 @@ class GnirehtetSupervisor:
         # 2. Stop any stale instance
         self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
-        # 2. Reset reverse tunnels and establish new one
+        # 3. Reset reverse tunnels and establish new one
         self.run_adb(["-s", serial, "reverse", "--remove-all"])
         code, out = self.run_adb(["-s", serial, "reverse", "localabstract:gnirehtet", f"tcp:{self.port}"])
         if code != 0:
             log_error(f"Failed to set adb reverse: {out}")
             return False
 
-        # 3. Start the VPN intent on Android
+        # 4. Start the VPN intent on Android
         intent_cmd = [
             "-s", serial,
             "shell", "am", "start",
@@ -417,8 +354,6 @@ class GnirehtetSupervisor:
             return False
 
         log_success(f"Reverse tether active and running on [{serial}]!")
-        play_sound_connect(self.enable_sound)
-        send_vrchat_osc("[Gnirehtet] Reverse tether connected!", ip=self.osc_ip, port=self.osc_port, enabled=self.enable_osc)
         return True
 
     def teardown_headset_tether(self, serial: str):
@@ -428,11 +363,9 @@ class GnirehtetSupervisor:
         self.run_adb(["-s", serial, "reverse", "--remove-all"])
 
     def handle_disconnect(self):
-        """Handles link drop, notifications, and state reset."""
+        """Handles link drop and state reset."""
         if self.is_connected:
             log_warn("Device disconnected or cable wiggled! Auto-recovery active...")
-            play_sound_disconnect(self.enable_sound)
-            send_vrchat_osc("[Gnirehtet] Link dropped! Auto-recovering...", ip=self.osc_ip, port=self.osc_port, enabled=self.enable_osc)
             self.is_connected = False
             self.current_serial = None
 
@@ -528,10 +461,6 @@ def parse_args():
     parser.add_argument("--jar", help="Path to gnirehtet.jar (defaults to auto-detect)")
     parser.add_argument("--jvm-args", help="Custom JVM arguments (e.g. '-XX:+UseZGC -Xms1g -Xmx1g')")
     parser.add_argument("--interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Device polling interval (seconds)")
-    parser.add_argument("--no-sound", action="store_true", help="Disable audio notifications on connect/disconnect")
-    parser.add_argument("--no-osc", action="store_true", help="Disable VRChat OSC notifications")
-    parser.add_argument("--osc-ip", default=DEFAULT_OSC_IP, help="VRChat OSC destination IP")
-    parser.add_argument("--osc-port", type=int, default=DEFAULT_OSC_PORT, help="VRChat OSC destination port")
     return parser.parse_args()
 
 
@@ -546,10 +475,6 @@ def main():
         java_path=args.java,
         jar_path=args.jar,
         jvm_args=jvm_args,
-        enable_sound=not args.no_sound,
-        enable_osc=not args.no_osc,
-        osc_ip=args.osc_ip,
-        osc_port=args.osc_port,
         poll_interval=args.interval,
     )
 

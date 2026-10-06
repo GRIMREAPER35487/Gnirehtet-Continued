@@ -8,7 +8,7 @@ It allows Android devices and Meta Quest headsets to share the internet connecti
 > ### Primarily Focused on VR Headsets & Continuous Wired Play
 > This edition is specifically engineered for **standalone and PCVR headsets** (such as **Meta Quest 2, Quest 3, Quest Pro**, and **Pico** devices).
 >
-> Generic reverse tether tools frequently crash, lock ports, or freeze on batch-file pauses whenever you take off your headset, let it sleep, or experience a Link cable wiggle. **Gnirehtet Continued** eliminates this frustration with automatic link self-healing, zero-touch APK installation, in-headset audio cues, and VRChat OSC chatbox notifications for an uninterrupted wired VR experience.
+> Generic reverse tether tools frequently crash, lock ports, or freeze on batch-file pauses whenever you take off your headset, let it sleep, or experience a Link cable wiggle. **Gnirehtet Continued** eliminates this frustration with automatic link self-healing, zero-touch APK installation, and resilient ADB reverse tunnel supervision for an uninterrupted wired VR experience.
 
 ---
 
@@ -20,9 +20,6 @@ This edition enhances the original project with a dedicated auto-recovery superv
 * **Auto-Provisioning Client APK:** Automatically detects whether the Gnirehtet VPN app is installed on the connected device and seamlessly installs `gnirehtet.apk` on first run.
 * **Modern Java & Low-Latency ZGC:** Built and verified on modern Java runtimes (Java 17, 21, and 25). Automatically enables low-latency ZGC garbage collection (`-XX:+UseZGC`) on modern JVMs to eliminate latency spikes.
 * **Dynamic Environment Discovery:** Automatically locates your ADB tools and Java installations across standard locations without any hardcoded paths or environment setup required.
-* **In-Headset Status Notifications:** 
-  * Audio cues (distinct tones on connect and disconnect).
-  * Optional VRChat OSC chatbox notifications (`[Gnirehtet] Reverse tether connected!`).
 * **Cross-Platform Launchers:** Simple one-click launchers for both Windows (`run_watchdog.cmd`) and Linux/macOS (`run_watchdog.sh`).
 
 ---
@@ -65,8 +62,7 @@ You can pass arguments directly to the supervisor script or through the launcher
 ```text
 usage: gnirehtet_watchdog.py [-h] [-s SERIAL] [-p PORT] [--adb ADB]
                              [--java JAVA] [--jar JAR] [--jvm-args JVM_ARGS]
-                             [--interval INTERVAL] [--no-sound] [--no-osc]
-                             [--osc-ip OSC_IP] [--osc-port OSC_PORT]
+                             [--interval INTERVAL]
 
 options:
   -h, --help           Show this help message and exit
@@ -77,15 +73,11 @@ options:
   --jar JAR            Custom path to gnirehtet.jar
   --jvm-args JVM_ARGS  Custom JVM arguments (e.g. '-XX:+UseZGC -Xms1g -Xmx1g')
   --interval INTERVAL  Device polling interval in seconds (default: 1.0)
-  --no-sound           Disable audio tones on connect/disconnect
-  --no-osc             Disable VRChat OSC notifications
-  --osc-ip OSC_IP      VRChat OSC destination IP (default: 127.0.0.1)
-  --osc-port OSC_PORT  VRChat OSC destination port (default: 9000)
 ```
 
 Example:
 ```powershell
-.\run_watchdog.cmd --no-osc --port 31416
+.\run_watchdog.cmd --port 31416
 ```
 
 ---
