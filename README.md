@@ -4,6 +4,12 @@ A high-performance, resilient **reverse tethering** supervisor over ADB for Andr
 
 It allows Android devices and Meta Quest headsets to share the internet connection of the computer they are connected to over USB. It requires **no root access** on the device or computer.
 
+> [!TIP]
+> ### 🥽 Primarily Focused on VR Headsets & Continuous Wired Play
+> This edition is specifically engineered for **standalone and PCVR headsets** (such as **Meta Quest 2, Quest 3, Quest Pro**, and **Pico** devices).
+>
+> Generic reverse tether tools frequently crash, lock ports, or freeze on batch-file pauses whenever you take off your headset, let it sleep, or experience a Link cable wiggle. **Gnirehtet Continued** eliminates this frustration with automatic link self-healing, zero-touch APK installation, in-headset audio cues, and VRChat OSC chatbox notifications for an uninterrupted wired VR experience.
+
 ---
 
 ## What's New in this Continued Edition
