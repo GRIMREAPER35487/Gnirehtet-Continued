@@ -1,3 +1,9 @@
+<div align="center">
+  <img src="https://raw.githubusercontent.com/GRIMREAPER35487/Gnirehtet-Continued/master/.github/banner.png" alt="Gnirehtet Continued" width="100%" />
+</div>
+
+<br/>
+
 # Gnirehtet Continued by Synthos
 
 Reverse tethering over ADB for Android devices and Meta Quest headsets. Allows your device to use your computer's internet connection over USB without root access.
