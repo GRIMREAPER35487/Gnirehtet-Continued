@@ -23,16 +23,16 @@ Reverse tethering over ADB for Android devices and Meta Quest headsets. Allows y
 
 ## Why Java Over Rust?
 
-Upstream Gnirehtet offered both Java and Rust versions of the desktop relay. For continuous tethering, especially with VR headsets, the Java relay proved more reliable:
+Upstream Gnirehtet offered both Java and Rust versions of the desktop relay. We dropped Rust and kept Java because it is much more reliable for long VR sessions:
 
-1. **Clean Socket Teardown:**  
-   Reverse ADB pipes themselves can be an issue and are inherently error-prone—broken pipes, transport stalls, and reset events don't just happen when a cable moves or a headset sleeps, but can occur spontaneously within ADB itself. In the Rust relay, abrupt disconnects could leave port 31416 stuck in a bound zombie state. The Java NIO relay handles client disconnections cleanly without affecting the listening server socket.
+1. **Better Disconnect Recovery:**  
+   ADB reverse tunnels drop frequently—whether from a cable bump, headset sleep, or random ADB transport glitches. With the Rust relay, sudden drops often locked up port 31416, forcing you to manually kill the process. The Java relay resets cleanly on disconnect without freezing the port.
 
-2. **Garbage Collection (ZGC):**  
-   Modern runtimes (Java 17+) provide the Z Garbage Collector (`-XX:+UseZGC`), which keeps pause times below a millisecond even under sustained high network throughput.
+2. **No GC Pauses with Modern Java:**  
+   Concerns about Java usually come down to garbage collection stutter. On modern Java (17+), the Z Garbage Collector (`-XX:+UseZGC`) keeps pause times under a millisecond, so throughput stays smooth even under heavy VR traffic.
 
 3. **Portability:**  
-   A single compiled JAR runs across Windows, Linux, and macOS without native binary dependencies or compiler toolchain differences.
+   A single `.jar` runs on Windows, Linux, and macOS without needing platform-specific compilers or native C runtime dependencies.
 
 ---
 
