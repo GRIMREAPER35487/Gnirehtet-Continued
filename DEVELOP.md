@@ -55,7 +55,7 @@ Gnirehtet consists of three primary components:
    - Monitors USB device connectivity via ADB.
    - Restarts the tunnel and restarts the VPN service on sleep/disconnect/reconnect events.
    - Provisions `gnirehtet.apk` automatically on first connect.
-   - Sends VRChat OSC and audio cue notifications.
+   - Provides continuous link health checking and auto-recovery.
 
 ---
 
