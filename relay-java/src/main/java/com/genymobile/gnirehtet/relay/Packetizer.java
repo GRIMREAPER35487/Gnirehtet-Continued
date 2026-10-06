@@ -30,11 +30,13 @@ public class Packetizer {
 
     private final IPv4Header responseIPv4Header;
     private final TransportHeader responseTransportHeader;
+    private final IPv4Packet packet;
 
     public Packetizer(IPv4Header ipv4Header, TransportHeader transportHeader) {
         responseIPv4Header = ipv4Header.copyTo(buffer);
         responseTransportHeader = transportHeader.copyTo(buffer);
         payloadBuffer = buffer.slice();
+        packet = new IPv4Packet(buffer, responseIPv4Header, responseTransportHeader);
     }
 
     public IPv4Header getResponseIPv4Header() {
@@ -64,6 +66,16 @@ public class Packetizer {
         return packetize(channel, payloadBuffer.capacity());
     }
 
+    public IPv4Packet packetizeDatagram(ReadableByteChannel channel) throws IOException {
+        payloadBuffer.limit(payloadBuffer.capacity()).position(0);
+        int payloadLength = channel.read(payloadBuffer);
+        if (payloadLength <= 0) {
+            return null;
+        }
+        payloadBuffer.flip();
+        return inflate();
+    }
+
     private IPv4Packet inflate() {
         int payloadLength = payloadBuffer.remaining();
         buffer.limit(payloadBuffer.arrayOffset() + payloadBuffer.limit()).position(0);
@@ -75,9 +87,9 @@ public class Packetizer {
         responseIPv4Header.setTotalLength(totalLength);
         responseTransportHeader.setPayloadLength(payloadLength);
 
-        // In order to avoid copies, buffer is shared with this IPv4Packet instance that is returned.
-        // Don't use it after another call to packetize()!
-        IPv4Packet packet = new IPv4Packet(buffer);
+        // Update the packet buffer limit
+        buffer.limit(totalLength);
+
         packet.computeChecksums();
         return packet;
     }

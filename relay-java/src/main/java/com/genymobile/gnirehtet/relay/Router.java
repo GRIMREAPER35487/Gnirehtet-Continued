@@ -18,8 +18,9 @@ package com.genymobile.gnirehtet.relay;
 
 import java.io.IOException;
 import java.nio.channels.Selector;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
 
 public class Router {
 
@@ -28,8 +29,7 @@ public class Router {
     private final Client client;
     private final Selector selector;
 
-    // there are typically only few connections per client, HashMap would be less efficient
-    private final List<Connection> connections = new ArrayList<>();
+    private final Map<ConnectionId, Connection> connections = new HashMap<>();
 
     public Router(Client client, Selector selector) {
         this.client = client;
@@ -57,7 +57,7 @@ public class Router {
         Connection connection = find(id);
         if (connection == null) {
             connection = createConnection(id, ipv4Header, transportHeader);
-            connections.add(connection);
+            connections.put(id, connection);
         }
         return connection;
     }
@@ -74,34 +74,32 @@ public class Router {
     }
 
     private Connection find(ConnectionId id) {
-        for (Connection connection : connections) {
-            if (id.equals(connection.getId())) {
-                return connection;
-            }
-        }
-        return null;
+        return connections.get(id);
     }
 
     public void clear() {
-        for (Connection connection : connections) {
+        for (Connection connection : connections.values()) {
             connection.disconnect();
         }
         connections.clear();
     }
 
     public void remove(Connection connection) {
-        if (!connections.remove(connection)) {
+        if (connections.remove(connection.getId()) == null) {
             throw new AssertionError("Removed a connection unknown from the router");
         }
     }
 
     public void cleanExpiredConnections() {
-        for (int i = connections.size() - 1; i >= 0; --i) {
-            Connection connection = connections.get(i);
+        Iterator<Connection> iterator = connections.values().iterator();
+        while (iterator.hasNext()) {
+            Connection connection = iterator.next();
             if (connection.isExpired()) {
-                Log.d(TAG, "Remove expired connection: " + connection.getId());
+                if (Log.isDebugEnabled()) {
+                    Log.d(TAG, "Remove expired connection: " + connection.getId());
+                }
                 connection.disconnect();
-                connections.remove(i);
+                iterator.remove();
             }
         }
     }

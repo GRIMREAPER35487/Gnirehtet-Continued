@@ -43,6 +43,8 @@ public class IPv4PacketBuffer {
         return length;
     }
 
+    private IPv4Packet packet;
+
     public IPv4Packet asIPv4Packet() {
         buffer.flip();
         int length = getAvailablePacketLength();
@@ -56,7 +58,12 @@ public class IPv4PacketBuffer {
         buffer.limit(limit).position(length);
         // In order to avoid copies, packetBuffer is shared with this IPv4Packet instance that is returned.
         // Don't use it after another call to next()!
-        return new IPv4Packet(packetBuffer);
+        if (packet == null) {
+            packet = new IPv4Packet(packetBuffer);
+        } else {
+            packet.wrap(packetBuffer);
+        }
+        return packet;
     }
 
     public void next() {

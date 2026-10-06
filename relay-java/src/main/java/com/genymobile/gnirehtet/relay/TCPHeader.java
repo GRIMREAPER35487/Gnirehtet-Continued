@@ -28,7 +28,7 @@ public class TCPHeader implements TransportHeader {
     public static final int FLAG_ACK = 1 << 4;
     public static final int FLAG_URG = 1 << 5;
 
-    private final ByteBuffer raw;
+    private ByteBuffer raw;
     private int sourcePort;
     private int destinationPort;
     private int headerLength;
@@ -38,6 +38,11 @@ public class TCPHeader implements TransportHeader {
     private int window;
 
     public TCPHeader(ByteBuffer raw) {
+        wrap(raw);
+    }
+
+    @Override
+    public void wrap(ByteBuffer raw) {
         this.raw = raw;
         sourcePort = Short.toUnsignedInt(raw.getShort(0));
         destinationPort = Short.toUnsignedInt(raw.getShort(2));
@@ -175,16 +180,7 @@ public class TCPHeader implements TransportHeader {
 
     @Override
     public void computeChecksum(IPv4Header ipv4Header, ByteBuffer payload) {
-        // checksum computation is the most CPU-intensive task in gnirehtet
-        // prefer optimization over readability
-        byte[] rawArray = raw.array();
-        int rawOffset = raw.arrayOffset();
-
-        byte[] payloadArray = payload.array();
-        int payloadOffset = payload.arrayOffset();
-
         // pseudo-header checksum (cf rfc793 section 3.1)
-
         int source = ipv4Header.getSource();
         int destination = ipv4Header.getDestination();
         int length = ipv4Header.getTotalLength() - ipv4Header.getHeaderLength();
@@ -201,18 +197,16 @@ public class TCPHeader implements TransportHeader {
         setChecksum((short) 0);
 
         for (int i = 0; i < headerLength / 2; ++i) {
-            // compute a 16-bit value from two 8-bit values manually
-            sum += ((rawArray[rawOffset + 2 * i] & 0xff) << 8) | (rawArray[rawOffset + 2 * i + 1] & 0xff);
+            sum += raw.getShort(2 * i) & 0xffff;
         }
 
         int payloadLength = length - headerLength;
         assert payloadLength == payload.limit() : "Payload length does not match";
         for (int i = 0; i < payloadLength / 2; ++i) {
-            // compute a 16-bit value from two 8-bit values manually
-            sum += ((payloadArray[payloadOffset + 2 * i] & 0xff) << 8) | (payloadArray[payloadOffset + 2 * i + 1] & 0xff);
+            sum += payload.getShort(2 * i) & 0xffff;
         }
         if (payloadLength % 2 != 0) {
-            sum += (payloadArray[payloadOffset + payloadLength - 1] & 0xff) << 8;
+            sum += (payload.get(payloadLength - 1) & 0xff) << 8;
         }
 
         while ((sum & ~0xffff) != 0) {

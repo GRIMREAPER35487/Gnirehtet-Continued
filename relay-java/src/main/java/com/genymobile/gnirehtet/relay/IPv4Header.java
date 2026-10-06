@@ -56,6 +56,10 @@ public class IPv4Header {
     private int destination;
 
     public IPv4Header(ByteBuffer raw) {
+        wrap(raw);
+    }
+
+    public void wrap(ByteBuffer raw) {
         assert raw.limit() >= MIN_IPV4_HEADER_LENGTH : "IPv4 headers length must be at least 20 bytes";
         this.raw = raw;
 
@@ -141,20 +145,12 @@ public class IPv4Header {
     }
 
     public void computeChecksum() {
-        // reset checksum field
         setChecksum((short) 0);
-
-        // checksum computation is the most CPU-intensive task in gnirehtet
-        // prefer optimization over readability
-        byte[] rawArray = raw.array();
-        int rawArrayOffset = raw.arrayOffset();
-
         int sum = 0;
         for (int i = 0; i < headerLength / 2; ++i) {
-            // compute a 16-bit value from two 8-bit values manually
-            sum += (rawArray[rawArrayOffset + 2 * i] & 0xff) << 8 | (rawArray[rawArrayOffset + 2 * i + 1] & 0xff);
+            sum += raw.getShort(2 * i) & 0xffff;
         }
-        while ((sum & ~0xffff) != 0) {
+        while ((sum >> 16) > 0) {
             sum = (sum & 0xffff) + (sum >> 16);
         }
         setChecksum((short) ~sum);

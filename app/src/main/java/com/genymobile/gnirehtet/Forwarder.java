@@ -17,6 +17,7 @@
 package com.genymobile.gnirehtet;
 
 import android.net.VpnService;
+import android.os.Process;
 import android.util.Log;
 
 import java.io.FileDescriptor;
@@ -90,6 +91,7 @@ public class Forwarder {
     @SuppressWarnings("checkstyle:MagicNumber")
     private void forwardDeviceToTunnel(Tunnel tunnel) throws IOException {
         Log.d(TAG, "Device to tunnel forwarding started");
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         FileInputStream vpnInput = new FileInputStream(vpnFileDescriptor);
         byte[] buffer = new byte[BUFSIZE];
         while (true) {
@@ -117,21 +119,18 @@ public class Forwarder {
 
     private void forwardTunnelToDevice(Tunnel tunnel) throws IOException {
         Log.d(TAG, "Tunnel to device forwarding started");
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         FileOutputStream vpnOutput = new FileOutputStream(vpnFileDescriptor);
         IPPacketOutputStream packetOutputStream = new IPPacketOutputStream(vpnOutput);
 
-        byte[] buffer = new byte[BUFSIZE];
         while (true) {
-            // blocking receive
-            int w = tunnel.receive(buffer);
+            // blocking read directly from socket into the IPPacketOutputStream buffer and sink it
+            int w = packetOutputStream.readFrom(tunnel);
             if (w == -1) {
                 Log.d(TAG, "Tunnel closed");
                 break;
             }
-            if (w > 0) {
-                // blocking write
-                packetOutputStream.write(buffer, 0, w);
-            } else {
+            if (w == 0) {
                 Log.d(TAG, "Empty write");
             }
         }

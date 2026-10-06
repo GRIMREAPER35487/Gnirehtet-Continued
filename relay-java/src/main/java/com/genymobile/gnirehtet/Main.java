@@ -20,7 +20,10 @@ import com.genymobile.gnirehtet.relay.CommandExecutionException;
 import com.genymobile.gnirehtet.relay.Log;
 import com.genymobile.gnirehtet.relay.Relay;
 
+import java.io.File;
 import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -32,7 +35,9 @@ import java.util.regex.Pattern;
 public final class Main {
     private static final String TAG = "Gnirehtet";
     private static final String NL = System.lineSeparator();
-    private static final String REQUIRED_APK_VERSION_CODE = "9";
+    private static final String REQUIRED_APK_VERSION_CODE = "14";
+    private static boolean debugMode = false;
+    private static boolean firstConnectionDetected = false;
 
     private Main() {
         // not instantiable
@@ -232,8 +237,20 @@ public final class Main {
     }
 
     private static void cmdRun(String serial, String dnsServers, String routes, int port) throws IOException {
-        // start in parallel so that the relay server is ready when the client connects
-        asyncStart(serial, dnsServers, routes, port);
+        // Start device monitoring to automatically handle start/reconnections in Java
+        new Thread(() -> {
+            AdbMonitor adbMonitor = new AdbMonitor((connectedSerial) -> {
+                if (serial == null || serial.equals(connectedSerial)) {
+                    Log.i(TAG, "Device detected: " + connectedSerial + ". Starting/reestablishing connection...");
+                    if (firstConnectionDetected || debugMode) {
+                        dumpHeadsetLogcat(connectedSerial);
+                    }
+                    firstConnectionDetected = true;
+                    asyncStart(connectedSerial, dnsServers, routes, port);
+                }
+            });
+            adbMonitor.monitor();
+        }).start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             // executed on Ctrl+C
@@ -244,7 +261,14 @@ public final class Main {
             }
         }));
 
-        cmdRelay(port);
+        Log.i(TAG, "Starting relay server on port " + port + "...");
+        new Relay(port, () -> {
+            Log.i(TAG, "Client connection dropped. Triggering auto-reconnect attempt...");
+            if (firstConnectionDetected || debugMode) {
+                new Thread(() -> dumpHeadsetLogcat(serial)).start();
+            }
+            asyncStart(serial, dnsServers, routes, port);
+        }).run();
     }
 
     private static void cmdAutorun(final String dnsServers, final String routes, int port) throws IOException {
@@ -262,6 +286,7 @@ public final class Main {
     @SuppressWarnings("checkstyle:MagicNumber")
     private static void cmdStart(String serial, String dnsServers, String routes, int port) throws InterruptedException, IOException,
             CommandExecutionException {
+
         if (mustInstallClient(serial)) {
             cmdInstall(serial);
             // wait a bit after the app is installed so that intent actions are correctly registered
@@ -270,6 +295,20 @@ public final class Main {
 
         Log.i(TAG, "Starting client...");
         cmdTunnel(serial, port);
+
+        // Whitelist client from battery optimizations to prevent Android idle throttling
+        try {
+            execAdb(serial, "shell", "dumpsys", "deviceidle", "whitelist", "+com.genymobile.gnirehtet");
+        } catch (Exception e) {
+            Log.w(TAG, "Cannot whitelist package from battery optimizations", e);
+        }
+
+        // Force the app into the active standby bucket to prevent system background restrictions
+        try {
+            execAdb(serial, "shell", "am", "set-standby-bucket", "com.genymobile.gnirehtet", "active");
+        } catch (Exception e) {
+            Log.w(TAG, "Cannot set standby bucket to active", e);
+        }
 
         List<String> cmd = new ArrayList<>();
         Collections.addAll(cmd, "shell", "am", "start", "-a", "com.genymobile.gnirehtet.START", "-n",
@@ -426,6 +465,18 @@ public final class Main {
     }
 
     public static void main(String... args) throws Exception {
+        boolean debug = false;
+        List<String> argsList = new ArrayList<>();
+        for (String arg : args) {
+            if ("--debug".equals(arg) || "-debug".equals(arg)) {
+                debug = true;
+            } else {
+                argsList.add(arg);
+            }
+        }
+        debugMode = debug;
+        args = argsList.toArray(new String[0]);
+
         if (args.length == 0) {
             printUsage();
             return;
@@ -457,6 +508,43 @@ public final class Main {
         } else {
             Log.e(TAG, "Unknown command: " + cmd);
             printUsage();
+        }
+    }
+
+    private static void dumpHeadsetLogcat(String serial) {
+        try {
+            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            File logFile = new File("gnirehtet_reconnect_logcat_" + timestamp + ".txt");
+            Log.i(TAG, "Dumping headset logcat to: " + logFile.getAbsolutePath());
+
+            List<String> command = createAdbCommand(serial, "logcat", "-d", "-v", "time");
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectOutput(logFile);
+            Process process = pb.start();
+
+            // Safety timeout thread
+            new Thread(() -> {
+                try {
+                    Thread.sleep(5000);
+                    process.destroy();
+                } catch (InterruptedException e) {
+                    // ignore
+                }
+            }).start();
+
+            int exitCode = process.waitFor();
+            if (exitCode == 0 && logFile.length() > 0) {
+                Log.i(TAG, "Headset logcat dumped successfully to " + logFile.getName());
+            } else {
+                if (logFile.exists()) {
+                    logFile.delete();
+                }
+                if (exitCode != 0) {
+                    Log.w(TAG, "Failed to dump headset logcat (exit code: " + exitCode + ")");
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Cannot dump headset logcat", e);
         }
     }
 }

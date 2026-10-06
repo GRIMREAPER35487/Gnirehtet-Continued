@@ -24,7 +24,7 @@ public interface Tunnel {
     void send(byte[] packet, int len) throws IOException;
 
     // blocking
-    int receive(byte[] packet) throws IOException;
+    int receiveTo(byte[] buffer, int offset, int maxLen) throws IOException;
 
     // blocking
     void close();

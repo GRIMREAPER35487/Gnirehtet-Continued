@@ -9,7 +9,7 @@ android {
         applicationId "com.genymobile.gnirehtet"
         minSdkVersion 21
         targetSdkVersion 29
-        versionCode 9
+        versionCode 14
         versionName "2.5.1"
         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
     }
@@ -17,6 +17,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.debug
         }
     }
 }

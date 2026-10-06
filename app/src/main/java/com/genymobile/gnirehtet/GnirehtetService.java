@@ -95,7 +95,7 @@ public class GnirehtetService extends VpnService {
         } else if (ACTION_CLOSE_VPN.equals(action)) {
             close();
         }
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     private boolean isRunning() {

@@ -17,6 +17,7 @@
 package com.genymobile.gnirehtet.relay;
 
 import java.io.IOException;
+import java.net.StandardSocketOptions;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
@@ -89,6 +90,8 @@ public class UDPConnection extends AbstractConnection {
         logi(TAG, "Open");
         DatagramChannel datagramChannel = DatagramChannel.open();
         datagramChannel.configureBlocking(false);
+        datagramChannel.setOption(StandardSocketOptions.SO_RCVBUF, 4 * 1024 * 1024);
+        datagramChannel.setOption(StandardSocketOptions.SO_SNDBUF, 2 * 1024 * 1024);
         datagramChannel.connect(getRewrittenDestination());
         return datagramChannel;
     }
@@ -98,12 +101,10 @@ public class UDPConnection extends AbstractConnection {
     }
 
     private void processReceive() {
-        IPv4Packet packet = read();
-        if (packet == null) {
-            close();
-            return;
+        IPv4Packet packet;
+        while ((packet = read()) != null) {
+            pushToClient(packet);
         }
-        pushToClient(packet);
     }
 
     private void processSend() {
@@ -114,7 +115,7 @@ public class UDPConnection extends AbstractConnection {
 
     private IPv4Packet read() {
         try {
-            return networkToClient.packetize(channel);
+            return networkToClient.packetizeDatagram(channel);
         } catch (IOException e) {
             loge(TAG, "Cannot read", e);
             return null;

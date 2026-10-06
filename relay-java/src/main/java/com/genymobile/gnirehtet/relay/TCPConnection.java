@@ -17,6 +17,7 @@
 package com.genymobile.gnirehtet.relay;
 
 import java.io.IOException;
+import java.net.StandardSocketOptions;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
@@ -195,6 +196,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         logi(TAG, "Open");
         SocketChannel socketChannel = SocketChannel.open();
         socketChannel.configureBlocking(false);
+        socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
         socketChannel.connect(getRewrittenDestination());
         return socketChannel;
     }

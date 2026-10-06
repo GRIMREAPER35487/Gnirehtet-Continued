@@ -39,7 +39,7 @@ public class Client {
     private int interests;
 
     private final IPv4PacketBuffer clientToNetwork = new IPv4PacketBuffer();
-    private final StreamBuffer networkToClient = new StreamBuffer(16 * IPv4Packet.MAX_PACKET_LENGTH);
+    private final StreamBuffer networkToClient = new StreamBuffer(64 * IPv4Packet.MAX_PACKET_LENGTH);
     private final Router router;
 
     private final List<PacketSource> pendingPacketSources = new ArrayList<>();
@@ -87,9 +87,11 @@ public class Client {
         return router;
     }
 
+    private String closeReason = "Unknown reason";
+
     private void processReceive() {
         if (!read()) {
-            close();
+            close(closeReason);
             return;
         }
         pushToNetwork();
@@ -98,12 +100,12 @@ public class Client {
     private void processSend() {
         if (mustSendId()) {
             if (!sendId()) {
-                close();
+                close(closeReason);
             }
             return;
         }
         if (!write()) {
-            close();
+            close(closeReason);
             return;
         }
         processPending();
@@ -111,8 +113,14 @@ public class Client {
 
     private boolean read() {
         try {
-            return clientToNetwork.readFrom(clientChannel) != -1;
+            int r = clientToNetwork.readFrom(clientChannel);
+            if (r == -1) {
+                closeReason = "EOF (headset client closed connection or USB cable unplugged)";
+                return false;
+            }
+            return true;
         } catch (IOException e) {
+            closeReason = "Read exception: " + e.getMessage();
             Log.e(TAG, "Cannot read", e);
             return false;
         }
@@ -120,8 +128,20 @@ public class Client {
 
     private boolean write() {
         try {
-            return networkToClient.writeTo(clientChannel) != -1;
+            while (!networkToClient.isEmpty()) {
+                int r = networkToClient.writeTo(clientChannel);
+                if (r == -1) {
+                    closeReason = "EOF on write";
+                    return false;
+                }
+                if (r == 0) {
+                    // Socket buffer full (would block), remaining data will be sent on next writable event
+                    break;
+                }
+            }
+            return true;
         } catch (IOException e) {
+            closeReason = "Write exception: " + e.getMessage();
             Log.e(TAG, "Cannot write", e);
             return false;
         }
@@ -135,6 +155,7 @@ public class Client {
         assert mustSendId();
         try {
             if (clientChannel.write(pendingIdBuffer) == -1) {
+                closeReason = "Cannot write client id (EOF)";
                 Log.w(TAG, "Cannot write client id #" + id + " (EOF)");
                 return false;
             }
@@ -145,6 +166,7 @@ public class Client {
             }
             return true;
         } catch (IOException e) {
+            closeReason = "Send ID exception: " + e.getMessage();
             Log.e(TAG, "Cannot write client id #" + id, e);
             return false;
         }
@@ -158,7 +180,9 @@ public class Client {
         }
     }
 
-    private void close() {
+    private void close(String reason) {
+        Log.i(TAG, "Client #" + id + " connection dropped. Reason: " + reason);
+        OscSender.sendVrcChatboxMessage("Disconnected Brb!");
         selectionKey.cancel();
         try {
             clientChannel.close();

@@ -23,11 +23,16 @@ public class UDPHeader implements TransportHeader {
 
     private static final int UDP_HEADER_LENGTH = 8;
 
-    private final ByteBuffer raw;
+    private ByteBuffer raw;
     private int sourcePort;
     private int destinationPort;
 
     public UDPHeader(ByteBuffer raw) {
+        wrap(raw);
+    }
+
+    @Override
+    public void wrap(ByteBuffer raw) {
         this.raw = raw;
         raw.limit(UDP_HEADER_LENGTH);
         sourcePort = Short.toUnsignedInt(raw.getShort(0));

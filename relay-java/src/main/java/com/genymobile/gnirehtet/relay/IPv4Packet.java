@@ -25,11 +25,21 @@ public class IPv4Packet {
     @SuppressWarnings("checkstyle:MagicNumber")
     public static final int MAX_PACKET_LENGTH = 1 << 16; // packet length is stored on 16 bits
 
-    private final ByteBuffer raw;
-    private final IPv4Header ipv4Header;
-    private final TransportHeader transportHeader;
+    private ByteBuffer raw;
+    private IPv4Header ipv4Header;
+    private TransportHeader transportHeader;
 
     public IPv4Packet(ByteBuffer raw) {
+        wrap(raw);
+    }
+
+    public IPv4Packet(ByteBuffer raw, IPv4Header ipv4Header, TransportHeader transportHeader) {
+        this.raw = raw;
+        this.ipv4Header = ipv4Header;
+        this.transportHeader = transportHeader;
+    }
+
+    public void wrap(ByteBuffer raw) {
         this.raw = raw;
         raw.rewind();
 
@@ -37,14 +47,29 @@ public class IPv4Packet {
             Log.v(TAG, "IPv4Packet: " + Binary.buildPacketString(raw));
         }
 
-        ipv4Header = new IPv4Header(raw.duplicate());
+        if (ipv4Header == null) {
+            ipv4Header = new IPv4Header(raw.duplicate());
+        } else {
+            ipv4Header.wrap(raw.duplicate());
+        }
         if (!ipv4Header.isSupported()) {
             Log.d(TAG, "Unsupported IPv4 headers");
             transportHeader = null;
             return;
         }
-        transportHeader = createTransportHeader();
+
+        Class<? extends TransportHeader> expectedClass = getExpectedHeaderClass();
+        if (transportHeader == null || !transportHeader.getClass().equals(expectedClass)) {
+            transportHeader = createTransportHeader();
+        } else {
+            transportHeader.wrap(getRawTransport());
+        }
         raw.limit(ipv4Header.getTotalLength());
+    }
+
+    private Class<? extends TransportHeader> getExpectedHeaderClass() {
+        IPv4Header.Protocol protocol = ipv4Header.getProtocol();
+        return protocol == IPv4Header.Protocol.TCP ? TCPHeader.class : UDPHeader.class;
     }
 
     public boolean isValid() {

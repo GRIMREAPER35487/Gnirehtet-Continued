@@ -36,6 +36,9 @@ public class Notifier {
             notificationBuilder.setSmallIcon(R.drawable.ic_usb_24dp);
         }
         notificationBuilder.addAction(createStopAction());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
+            notificationBuilder.setPriority(Notification.PRIORITY_MAX);
+        }
         return notificationBuilder.build();
     }
 
@@ -84,7 +87,11 @@ public class Notifier {
 
     private Notification.Action createStopAction() {
         Intent stopIntent = GnirehtetService.createStopIntent(context);
-        PendingIntent stopPendingIntent = PendingIntent.getService(context, 0, stopIntent, PendingIntent.FLAG_ONE_SHOT);
+        int flags = PendingIntent.FLAG_ONE_SHOT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        PendingIntent stopPendingIntent = PendingIntent.getService(context, 0, stopIntent, flags);
         // the non-deprecated constructor is not available in API 21
         @SuppressWarnings("deprecation")
         Notification.Action.Builder actionBuilder = new Notification.Action.Builder(R.drawable.ic_close_24dp, context.getString(R.string.stop_vpn),

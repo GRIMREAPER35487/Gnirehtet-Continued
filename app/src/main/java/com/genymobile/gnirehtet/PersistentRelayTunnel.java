@@ -56,12 +56,12 @@ public class PersistentRelayTunnel implements Tunnel {
     }
 
     @Override
-    public int receive(byte[] packet) throws IOException {
+    public int receiveTo(byte[] buffer, int offset, int maxLen) throws IOException {
         while (!stopped.get()) {
             Tunnel tunnel = null;
             try {
                 tunnel = provider.getCurrentTunnel();
-                int r = tunnel.receive(packet);
+                int r = tunnel.receiveTo(buffer, offset, maxLen);
                 if (r == -1) {
                     Log.d(TAG, "Tunnel read EOF");
                     provider.invalidateTunnel(tunnel);
