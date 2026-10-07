@@ -64,21 +64,21 @@ public final class RelayTunnel implements Tunnel {
         if (relayHost != null && !relayHost.isEmpty()) {
             Log.i(TAG, "Connecting to Native USB relay at " + relayHost + ":" + relayPort);
             tcpSocket = new Socket();
-            tcpSocket.setTcpNoDelay(true);
-            tcpSocket.setReceiveBufferSize(BUFFER_SIZE);
-            tcpSocket.setSendBufferSize(BUFFER_SIZE);
             if (vpnService != null) {
                 vpnService.protect(tcpSocket);
             }
             tcpSocket.connect(new InetSocketAddress(relayHost, relayPort), CONNECT_TIMEOUT_MS);
+            tcpSocket.setTcpNoDelay(true);
+            tcpSocket.setReceiveBufferSize(BUFFER_SIZE);
+            tcpSocket.setSendBufferSize(BUFFER_SIZE);
             inputStream = tcpSocket.getInputStream();
             outputStream = tcpSocket.getOutputStream();
         } else {
             Log.i(TAG, "Connecting to legacy ADB reverse socket: " + LOCAL_ABSTRACT_NAME);
             localSocket = new LocalSocket();
+            localSocket.connect(new LocalSocketAddress(LOCAL_ABSTRACT_NAME));
             localSocket.setReceiveBufferSize(BUFFER_SIZE);
             localSocket.setSendBufferSize(BUFFER_SIZE);
-            localSocket.connect(new LocalSocketAddress(LOCAL_ABSTRACT_NAME));
             inputStream = localSocket.getInputStream();
             outputStream = localSocket.getOutputStream();
         }
