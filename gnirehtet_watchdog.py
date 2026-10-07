@@ -326,7 +326,7 @@ class UsbNcmDhcpServer:
             self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.rx_sock.bind(("", 67))
         except Exception as e:
-            log_warn(f"UsbNcmDhcpServer: Unable to bind UDP port 67: {e}")
+            log_info("UDP port 67 in use by Windows (SharedAccess / ICS active). Host ICS will serve DHCP lease.")
             return
 
         try:
@@ -493,10 +493,11 @@ def ensure_windows_nat(subnet_cidr: str = "192.168.42.0/24", nat_name: str = "Gn
     return False
 
 
-def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix_len: int = 24) -> bool:
-    """Ensures the Windows UsbNcm adapter is assigned the static IP and firewall rule is active."""
+def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix_len: int = 24) -> Optional[str]:
+    """Ensures the Windows UsbNcm adapter is assigned an IP and firewall rule is active.
+    Returns the active IP on the adapter (supports Windows ICS 192.168.137.1 or custom)."""
     if os.name != "nt":
-        return True
+        return ip
 
     adapter_name = adapter.get("Name", "")
     if_index = adapter.get("ifIndex")
@@ -504,7 +505,7 @@ def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix
     # 1. Ensure Windows Firewall permits UDP 67 and Subnet traffic
     ensure_windows_firewall_rules()
 
-    # 2. Check if IP is already configured
+    # 2. Check if an IP is already configured (e.g. from Windows ICS or prior configuration)
     try:
         chk_cmd = f"Get-NetIPAddress -InterfaceIndex {if_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
         chk_res = subprocess.run(
@@ -514,18 +515,20 @@ def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix
             timeout=4,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
-        if ip in chk_res.stdout:
-            # Mark network as Private so firewall doesn't block local traffic
+        existing_ips = [line.strip() for line in chk_res.stdout.splitlines() if line.strip() and not line.strip().startswith("169.254.")]
+        if existing_ips:
+            active_ip = existing_ips[0]
+            # Ensure Private network category
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"],
                 capture_output=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-            return True
+            return active_ip
     except Exception:
         pass
 
-    # 3. Try configuring via PowerShell / Netsh
+    # 3. Try configuring static IP via PowerShell
     log_info(f"Assigning static IP {ip}/{prefix_len} to Windows adapter '{adapter_name}'...")
     cfg_cmd = (
         f"Get-NetIPAddress -InterfaceIndex {if_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue; "
@@ -541,7 +544,7 @@ def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     if res.returncode == 0:
-        return True
+        return ip
 
     # 4. If unelevated, attempt netsh with UAC elevation
     try:
@@ -562,17 +565,18 @@ def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix
             timeout=4,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
-        if ip in chk_res.stdout:
+        existing_ips = [line.strip() for line in chk_res.stdout.splitlines() if line.strip() and not line.strip().startswith("169.254.")]
+        if existing_ips:
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"],
                 capture_output=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-            return True
+            return existing_ips[0]
     except Exception as e:
         log_warn(f"Failed to elevate adapter IP configuration: {e}")
 
-    return False
+    return None
 
 
 class GnirehtetSupervisor:
@@ -810,13 +814,18 @@ class GnirehtetSupervisor:
 
             log_success(f"Windows UsbNcm adapter detected: '{adapter.get('Name')}' (ifIndex: {adapter.get('ifIndex')})")
 
-            # Configure static IP on Windows adapter
-            configured = configure_windows_ncm_adapter(adapter, self.pc_ip)
-            if not configured:
-                log_warn("Failed to set static IP on Windows UsbNcm adapter.")
+            # Configure or detect IP on Windows adapter (supports ICS 192.168.137.1)
+            configured_ip = configure_windows_ncm_adapter(adapter, self.pc_ip)
+            if not configured_ip:
+                log_warn("Failed to configure IP on Windows UsbNcm adapter.")
                 return None
 
-            # Start Python DHCP server
+            self.pc_ip = configured_ip
+            octets = self.pc_ip.split(".")
+            if len(octets) == 4 and self.headset_ip == DEFAULT_HEADSET_IP and self.pc_ip != DEFAULT_PC_IP:
+                self.headset_ip = f"{octets[0]}.{octets[1]}.{octets[2]}.2"
+
+            # Start Python DHCP server (if not provided by host ICS)
             if not self.dhcp_server or not self.dhcp_server.running:
                 self.dhcp_server = UsbNcmDhcpServer(
                     server_ip=self.pc_ip,
@@ -830,9 +839,14 @@ class GnirehtetSupervisor:
             leased = False
             for _ in range(15):
                 code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"])
-                if code == 0 and self.headset_ip in addr_out:
-                    leased = True
-                    break
+                if code == 0 and "inet " in addr_out:
+                    match = re.search(r"inet\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", addr_out)
+                    if match:
+                        actual_ip = match.group(1)
+                        if not actual_ip.startswith("169.254."):
+                            self.headset_ip = actual_ip
+                            leased = True
+                            break
                 time.sleep(1.0)
 
             if leased:
@@ -848,7 +862,7 @@ class GnirehtetSupervisor:
         """Verifies if the tether connection is active and healthy."""
         if self.active_native_mode:
             code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"])
-            return code == 0 and self.headset_ip in addr_out
+            return code == 0 and "inet " in addr_out and not ("169.254." in addr_out)
         else:
             code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
             if code != 0 or not out.strip():
