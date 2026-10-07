@@ -2,11 +2,11 @@
 setlocal
 title Enable Windows Internet Connection Sharing for Meta Quest
 
-:: Check for Administrator elevation; if not, request UAC elevation
+:: If not elevated, relaunch with RunAs administrator
 net session >nul 2>&1
 if errorlevel 1 (
-    echo Requesting Administrator rights for Internet Connection Sharing...
-    powershell -NoProfile -Command "Start-Process '%~f0' -Verb RunAs"
+    echo Requesting Administrator permissions...
+    powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c \"\"%~f0\"\"' -Verb RunAs"
     exit /b
 )
 
