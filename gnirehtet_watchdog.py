@@ -260,9 +260,11 @@ def build_dhcp_reply(
     options.extend(bytes([51, 4]) + struct.pack(">I", lease_time))
     # Option 1: Subnet Mask
     options.extend(bytes([1, 4]) + socket.inet_aton(netmask))
-    # Option 3 (Router/Gateway) and Option 6 (DNS) are intentionally omitted for the point-to-point
-    # NCM link. This prevents Android from treating raw usb0 as its primary internet gateway and
-    # failing captive-portal/DNS checks, allowing the Gnirehtet VPN (tun0) to manage all internet routing.
+    # Option 3: Router / Default Gateway
+    options.extend(bytes([3, 4]) + socket.inet_aton(server_ip))
+    # Option 6: Domain Name Server
+    dns_bytes = b"".join(socket.inet_aton(dns) for dns in dns_servers)
+    options.extend(bytes([6, len(dns_bytes)]) + dns_bytes)
     # Option 255: End Option
     options.append(255)
 
