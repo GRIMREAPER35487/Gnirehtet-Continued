@@ -589,6 +589,7 @@ class GnirehtetSupervisor:
         jar_path: Optional[str] = None,
         jvm_args: Optional[List[str]] = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        native: bool = False,
         legacy: bool = False,
         host: Optional[str] = None,
         pc_ip: str = DEFAULT_PC_IP,
@@ -602,7 +603,8 @@ class GnirehtetSupervisor:
         self.jar = find_jar(jar_path)
         self.jvm_args = jvm_args if jvm_args is not None else get_default_jvm_args(self.java)
         self.poll_interval = poll_interval
-        self.legacy = legacy
+        self.native = native
+        self.legacy = legacy or not native
         self.host_override = host
         self.pc_ip = pc_ip
         self.headset_ip = headset_ip
@@ -877,19 +879,18 @@ class GnirehtetSupervisor:
         # 1. Stop any stale VPN instance (ensures no VpnService swallows the native hardware link)
         self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
-        # 2. Determine transport mode: Native USB (default) vs Legacy ADB reverse
+        # 2. Determine transport mode: Standard ADB reverse (default) vs Native USB (experimental)
         relay_host: Optional[str] = None
-        if self.legacy:
-            log_info("Legacy mode specified (--legacy). Using ADB reverse tunnel...")
-            self.active_native_mode = False
-        else:
-            log_info("Attempting high-speed Native USB (CDC-NCM) connection...")
+        if self.native:
+            log_info("Experimental Native USB (CDC-NCM) mode requested (--native)...")
             relay_host = self.ensure_ncm_link(serial)
             if relay_host:
                 self.active_native_mode = True
             else:
-                log_warn("Native USB unavailable. Falling back to verified legacy ADB reverse tunnel...")
+                log_warn("Native USB unavailable. Falling back to default ADB reverse tunnel...")
                 self.active_native_mode = False
+        else:
+            self.active_native_mode = False
 
         if not self.active_native_mode:
             # Legacy mode: verify APK is installed
@@ -977,23 +978,23 @@ class GnirehtetSupervisor:
         log_info(f"Java:  {self.java}")
         log_info(f"JAR:   {self.jar}")
         log_info(f"Port:  {self.port}")
-        mode_str = "Legacy ADB Reverse" if self.legacy else "Native USB (CDC-NCM / Direct IP) [Default]"
+        mode_str = "Native USB (CDC-NCM) [Experimental]" if self.native else "Standard ADB Reverse Relay [Default]"
         log_info(f"Mode:  {mode_str}")
         if self.host_override:
             log_info(f"Host:  {self.host_override}")
         if self.target_serial:
             log_info(f"Target Serial: {self.target_serial}")
 
-        # Ensure relay server is running if in legacy mode
-        if self.legacy:
+        # Ensure relay server is running (default mode requires it)
+        if not self.native:
             self.start_relay_server()
 
         log_info("Waiting for Android / Quest device to connect...")
 
         while self.running:
             try:
-                # 1. Ensure relay server process is alive (only if legacy reverse tunnel is needed)
-                if self.legacy or (self.is_connected and not self.active_native_mode):
+                # 1. Ensure relay server process is alive (in default mode)
+                if not self.active_native_mode:
                     if not self.relay_process or self.relay_process.poll() is not None:
                         log_warn("Relay server process is not running. Restarting...")
                         self.start_relay_server()
@@ -1062,7 +1063,8 @@ def parse_args():
     )
     parser.add_argument("-s", "--serial", help="Specific device serial (defaults to auto-detecting first device)")
     parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT, help="Relay server port")
-    parser.add_argument("--legacy", action="store_true", help="Force legacy ADB reverse tunnel instead of native USB CDC-NCM")
+    parser.add_argument("--native", "--ncm", dest="native", action="store_true", help="[Experimental] Opt-in to native USB CDC-NCM Ethernet gadget (work in progress)")
+    parser.add_argument("--legacy", action="store_true", help="Explicitly specify standard ADB reverse tunnel (default behavior)")
     parser.add_argument("--host", help="Custom PC host IP for Native USB mode (auto-detected if omitted)")
     parser.add_argument("--pc-ip", default=DEFAULT_PC_IP, help="PC static IP on NCM adapter (default: 192.168.42.1)")
     parser.add_argument("--headset-ip", default=DEFAULT_HEADSET_IP, help="Headset DHCP IP on NCM link (default: 192.168.42.2)")
@@ -1087,7 +1089,8 @@ def main():
         jar_path=args.jar,
         jvm_args=jvm_args,
         poll_interval=args.interval,
-        legacy=args.legacy,
+        native=args.native,
+        legacy=args.legacy or not args.native,
         host=args.host,
         pc_ip=args.pc_ip,
         headset_ip=args.headset_ip,
