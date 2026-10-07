@@ -1,7 +1,6 @@
 package com.genymobile.gnirehtet.relay;
 
 import java.io.IOException;
-import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.channels.SelectionKey;
@@ -29,8 +28,8 @@ public class TunnelServer {
         this.listener = listener;
         ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.configureBlocking(false);
-        // ServerSocketChannel.bind() requires API 24
-        serverSocketChannel.socket().bind(new InetSocketAddress(Inet4Address.getLoopbackAddress(), port));
+        // Bind to all local interfaces (0.0.0.0) so it accepts both direct Native USB (NCM) and legacy ADB reverse loopback
+        serverSocketChannel.socket().bind(new InetSocketAddress(port));
 
         SelectionHandler socketChannelHandler = (selectionKey) -> {
             try {
