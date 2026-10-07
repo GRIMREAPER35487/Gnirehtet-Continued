@@ -18,14 +18,13 @@ Reverse tethering over ADB for Android devices and Meta Quest headsets. Allows y
 
 ## Changes in This Fork
 
-* **Native USB Networking (CDC-NCM / Direct IP):** Meta Quest headsets (Horizon OS v2.5+) feature a native USB Ethernet mode ("USB connection for apps") that provides direct point-to-point networking. Gnirehtet Continued now **defaults to Native USB mode**, bypassing ADB port-forwarding overhead for true multi-gigabit line speeds and minimal CPU usage.
-* **Seamless Legacy Fallback:** Fully backwards compatible with all standard Android devices and setups where native USB is unavailable. The supervisor automatically detects whether the device exposes a USB network interface and falls back to standard ADB reverse tunneling if absent (or when `--legacy` is specified).
-* **Automatic Link Recovery:** Standard batch scripts stop or hang when an ADB connection breaks. A Python supervisor (`gnirehtet_watchdog.py`) monitors device state, cleans up stale tunnels when the device sleeps or disconnects, and restores the reverse tether the moment it reconnects.
+* **Rock-Solid Automatic Link Recovery:** Standard batch scripts stop or hang when an ADB connection breaks. A Python supervisor (`gnirehtet_watchdog.py`) monitors device state, cleans up stale tunnels when the device sleeps or disconnects, and restores the reverse tether the moment it reconnects.
 * **Java Relay Only:** The legacy Rust relay was removed in favor of the Java NIO implementation, which handles sudden socket drops without leaking port bindings or locking threads.
 * **Automatic APK Installation:** Checks for the `com.genymobile.gnirehtet` package on connect and installs `gnirehtet.apk` automatically if it is not present.
 * **Modern Java & ZGC:** Updated to build on modern JDKs (up to Java 25). Automatically applies `-XX:+UseZGC` when available to keep GC pauses minimal under heavy traffic.
 * **Automatic Tool Discovery:** Finds `adb` and `java` in standard system paths (Android SDK, JDK installs, PATH) without requiring manual configuration.
 * **Simple Launchers:** Includes `run_watchdog.cmd` for Windows and `run_watchdog.sh` for Linux/macOS.
+* **[Experimental] Native USB CDC-NCM Mode:** Opt-in flag (`--native`) to experiment with direct hardware Ethernet gadget routing at 3.8 Gbps.
 
 ---
 
@@ -50,9 +49,8 @@ Upstream Gnirehtet offered both Java and Rust versions of the desktop relay. We 
 * **Computer:** Windows, Linux, or macOS with **Python 3** and **Java 17+** (Java 21 or 25 recommended for low-latency ZGC).
 * **ADB:** [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) installed and in your `PATH` or standard SDK directory.
 * **Device:** Android 5.0+ or Meta Quest with **USB debugging enabled**.
-* **(Optional for maximum speed on Quest):** Enable **Settings > Link > "USB connection for apps"** inside your Meta Quest headset.
 
-### Running
+### Running (Default Stable Mode)
 
 * **Windows:** Run `run_watchdog.cmd` (or double-click it).
 * **Linux / macOS:** Run `./run_watchdog.sh`.
@@ -61,10 +59,26 @@ The supervisor will:
 1. Start the Java relay server (`gnirehtet.jar`).
 2. Wait for a device over ADB.
 3. Install `gnirehtet.apk` if missing.
-4. Auto-detect if **Native USB (CDC-NCM)** is available:
-   * **If active:** Direct high-speed TCP socket is connected to the PC host IP over the USB ethernet link.
-   * **If inactive or `--legacy` flag is set:** Automatically falls back to ADB reverse tunnel (`localabstract:gnirehtet`).
-5. Monitor link health and recover automatically if the connection drops.
+4. Set up the ADB reverse tunnel (`localabstract:gnirehtet` $\leftrightarrow$ `tcp:31416`) and launch the Android VPN client.
+5. Continuously monitor link health and recover automatically if the connection drops.
+
+---
+
+## Experimental: Native USB CDC-NCM Mode (`--native`)
+
+> [!WARNING]
+> ### Work In Progress / Experimental Status
+> Meta Quest headsets feature an NCM USB Ethernet gadget capable of 3.8 Gbps direct physical networking. You can experiment with this pipeline by passing `--native` (or `--ncm`).
+>
+> **Known Limitations:**
+> * **Internet Routing / NAT:** In native mode, the headset operates as an ordinary network adapter (`usb0`). On Windows, unless Windows NAT (`WinNAT` on Hyper-V) or Windows Internet Connection Sharing (ICS via `setup_ics.cmd`) is actively routing internet to the UsbNcm adapter, the headset has no internet.
+> * **VR Cloud Auth:** VR streaming apps like Virtual Desktop require an active internet connection on the headset at startup for account authentication; without internet routing over the cable (or Wi-Fi left on), streamer discovery will fail.
+> * **Recommendation:** For daily use, stick with the **default mode** (standard ADB reverse tunnel), which reliably provides internet to all apps without special network configuration.
+
+To test the experimental mode:
+```powershell
+.\run_watchdog.cmd --native
+```
 
 ---
 
@@ -73,7 +87,7 @@ The supervisor will:
 Arguments can be passed to `run_watchdog.cmd` / `run_watchdog.sh` or directly to `gnirehtet_watchdog.py`:
 
 ```text
-usage: gnirehtet_watchdog.py [-h] [-s SERIAL] [-p PORT] [--legacy]
+usage: gnirehtet_watchdog.py [-h] [-s SERIAL] [-p PORT] [--native] [--legacy]
                              [--host HOST] [--adb ADB] [--java JAVA]
                              [--jar JAR] [--jvm-args JVM_ARGS]
                              [--interval INTERVAL]
@@ -82,7 +96,8 @@ options:
   -h, --help           Show this help message and exit
   -s, --serial SERIAL  Target specific device serial (default: auto-detects first device)
   -p, --port PORT      Relay server port (default: 31416)
-  --legacy             Force legacy ADB reverse tunnel instead of native USB CDC-NCM
+  --native, --ncm      [Experimental] Opt-in to native USB CDC-NCM mode (work in progress)
+  --legacy             Explicitly specify standard ADB reverse tunnel (default behavior)
   --host HOST          Custom PC host IP for Native USB mode (auto-detected if omitted)
   --adb ADB            Custom path to adb executable
   --java JAVA          Custom path to java executable
