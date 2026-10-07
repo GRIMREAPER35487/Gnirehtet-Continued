@@ -147,17 +147,25 @@ public class GnirehtetService extends VpnService {
             return false;
         }
 
-        setAsUndernlyingNetwork();
+        setAsUndernlyingNetwork(config);
         return true;
     }
 
     @SuppressWarnings("checkstyle:MagicNumber")
-    private void setAsUndernlyingNetwork() {
+    private void setAsUndernlyingNetwork(VpnConfiguration config) {
         if (Build.VERSION.SDK_INT >= 22) {
-            Network vpnNetwork = findVpnNetwork();
-            if (vpnNetwork != null) {
-                // so that applications knows that network is available
-                setUnderlyingNetworks(new Network[] {vpnNetwork});
+            if (config.getRelayHost() != null && !config.getRelayHost().isEmpty()) {
+                // In Native USB mode, the relay tunnel connects directly to the host PC via the
+                // physical interface (usb0). Setting underlying networks to null tells Android
+                // to bind protected sockets to the physical network interface instead of trapping
+                // them in an infinite loop against the VPN interface itself.
+                setUnderlyingNetworks(null);
+            } else {
+                Network vpnNetwork = findVpnNetwork();
+                if (vpnNetwork != null) {
+                    // Legacy ADB reverse mode compatibility hack for older Android versions
+                    setUnderlyingNetworks(new Network[] {vpnNetwork});
+                }
             }
         } else {
             Log.w(TAG, "Cannot set underlying network, API version " + Build.VERSION.SDK_INT + " < 22");

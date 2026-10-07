@@ -21,13 +21,17 @@ limitations under the License.
 
 import argparse
 import glob
+import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
+import threading
 import time
 from typing import List, Optional, Tuple
 
@@ -35,6 +39,10 @@ from typing import List, Optional, Tuple
 DEFAULT_PORT = 31416
 DEFAULT_POLL_INTERVAL = 1.0
 ADB_TIMEOUT_SEC = 4.0
+DEFAULT_NCM_SUBNET = "192.168.42"
+DEFAULT_PC_IP = "192.168.42.1"
+DEFAULT_HEADSET_IP = "192.168.42.2"
+DEFAULT_NETMASK = "255.255.255.0"
 
 # Process priority flag for Windows (High priority class)
 HIGH_PRIORITY_CLASS = 0x00000080 if os.name == "nt" else 0
@@ -190,6 +198,356 @@ def get_default_jvm_args(java_bin: str) -> List[str]:
     return ["-Xms512m", "-Xmx1g"]
 
 
+def parse_dhcp_option(data: bytes, option_code: int) -> Optional[bytes]:
+    """Extracts a specific DHCP option payload from a raw BOOTP/DHCP packet."""
+    if len(data) < 240 or data[236:240] != bytes([99, 130, 83, 99]):
+        return None
+    idx = 240
+    while idx < len(data):
+        opt = data[idx]
+        if opt == 255:  # End of options
+            break
+        if opt == 0:  # Pad option
+            idx += 1
+            continue
+        if idx + 1 >= len(data):
+            break
+        opt_len = data[idx + 1]
+        if opt == option_code:
+            return data[idx + 2 : idx + 2 + opt_len]
+        idx += 2 + opt_len
+    return None
+
+
+def build_dhcp_reply(
+    req: bytes,
+    msg_type: int,  # 2 = DHCPOFFER, 5 = DHCPACK
+    server_ip: str = DEFAULT_PC_IP,
+    offer_ip: str = DEFAULT_HEADSET_IP,
+    netmask: str = DEFAULT_NETMASK,
+    lease_time: int = 3600,
+    dns_servers: Optional[List[str]] = None,
+) -> bytes:
+    """Constructs a binary BOOTP/DHCP reply packet (OFFER or ACK)."""
+    if dns_servers is None:
+        dns_servers = ["1.1.1.1", "8.8.8.8"]
+
+    reply = bytearray(300)
+    reply[0] = 2  # BOOTREPLY
+    reply[1] = 1  # Hardware type: Ethernet
+    reply[2] = 6  # Hardware address length: 6 bytes
+    reply[3] = 0  # Hops: 0
+
+    # Copy transaction ID (xid) and flags from request
+    reply[4:8] = req[4:8]
+    reply[10:12] = req[10:12]
+
+    # Addresses
+    reply[16:20] = socket.inet_aton(offer_ip)   # yiaddr: Your (client) IP address
+    reply[20:24] = socket.inet_aton(server_ip)  # siaddr: Next server IP address
+    reply[28:44] = req[28:44]                   # chaddr: Client hardware address (MAC)
+
+    # Magic cookie (0x63825363)
+    reply[236:240] = bytes([99, 130, 83, 99])
+
+    # Options
+    options = bytearray()
+    # Option 53: DHCP Message Type
+    options.extend(bytes([53, 1, msg_type]))
+    # Option 54: Server Identifier
+    options.extend(bytes([54, 4]) + socket.inet_aton(server_ip))
+    # Option 51: IP Address Lease Time
+    options.extend(bytes([51, 4]) + struct.pack(">I", lease_time))
+    # Option 1: Subnet Mask
+    options.extend(bytes([1, 4]) + socket.inet_aton(netmask))
+    # Option 3 (Router/Gateway) and Option 6 (DNS) are intentionally omitted for the point-to-point
+    # NCM link. This prevents Android from treating raw usb0 as its primary internet gateway and
+    # failing captive-portal/DNS checks, allowing the Gnirehtet VPN (tun0) to manage all internet routing.
+    # Option 255: End Option
+    options.append(255)
+
+    reply[240 : 240 + len(options)] = options
+    return bytes(reply[: 240 + len(options)])
+
+
+class UsbNcmDhcpServer:
+    """Lightweight pure-Python DHCP server for USB CDC-NCM point-to-point links."""
+
+    def __init__(
+        self,
+        server_ip: str = DEFAULT_PC_IP,
+        client_ip: str = DEFAULT_HEADSET_IP,
+        netmask: str = DEFAULT_NETMASK,
+        pc_mac: Optional[str] = None,
+    ):
+        self.server_ip = server_ip
+        self.client_ip = client_ip
+        self.netmask = netmask
+        self.pc_mac = pc_mac.lower().replace("-", ":") if pc_mac else None
+        self.running = False
+        self.leased = False
+        self.thread: Optional[threading.Thread] = None
+        self.rx_sock: Optional[socket.socket] = None
+        self.tx_sock: Optional[socket.socket] = None
+
+    def start(self):
+        """Starts the DHCP server in a background daemon thread."""
+        if self.running:
+            return
+        self.running = True
+        self.leased = False
+        self.thread = threading.Thread(target=self._run, daemon=True, name="UsbNcmDhcpServer")
+        self.thread.start()
+
+    def stop(self):
+        """Stops the DHCP server and cleans up sockets."""
+        self.running = False
+        if self.rx_sock:
+            try:
+                self.rx_sock.close()
+            except Exception:
+                pass
+        if self.tx_sock:
+            try:
+                self.tx_sock.close()
+            except Exception:
+                pass
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        self.rx_sock = None
+        self.tx_sock = None
+
+    def _run(self):
+        try:
+            self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.rx_sock.bind(("", 67))
+        except Exception as e:
+            log_warn(f"UsbNcmDhcpServer: Unable to bind UDP port 67: {e}")
+            return
+
+        try:
+            self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.tx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.tx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            try:
+                self.tx_sock.bind((self.server_ip, 0))
+            except Exception:
+                self.tx_sock.bind(("", 0))
+        except Exception as e:
+            log_warn(f"UsbNcmDhcpServer: Unable to bind TX socket: {e}")
+            return
+
+        log_info(f"DHCP server active on UDP 67 (offering {self.client_ip} on subnet {self.server_ip})...")
+
+        while self.running:
+            try:
+                r, _, _ = select.select([self.rx_sock], [], [], 0.5)
+                if not r or not self.running:
+                    continue
+                data, _ = self.rx_sock.recvfrom(1500)
+                if len(data) < 240 or data[0] != 1:  # Not BOOTREQUEST
+                    continue
+                if data[236:240] != bytes([99, 130, 83, 99]):  # Magic cookie mismatch
+                    continue
+
+                opt_53 = parse_dhcp_option(data, 53)
+                if not opt_53:
+                    continue
+                msg_type = opt_53[0]
+
+                mac = ":".join(f"{b:02x}" for b in data[28:34])
+                # Skip requests originating from PC's own adapter
+                if self.pc_mac and mac.lower() == self.pc_mac.lower():
+                    continue
+
+                if msg_type == 1:  # DHCPDISCOVER
+                    reply = build_dhcp_reply(data, 2, self.server_ip, self.client_ip, self.netmask)
+                    self.tx_sock.sendto(reply, ("255.255.255.255", 68))
+                    log_info(f"DHCP: Received DISCOVER from [{mac}]. Sent OFFER -> {self.client_ip}")
+
+                elif msg_type == 3:  # DHCPREQUEST
+                    reply = build_dhcp_reply(data, 5, self.server_ip, self.client_ip, self.netmask)
+                    ciaddr = socket.inet_ntoa(data[12:16])
+                    dest = (ciaddr, 68) if ciaddr != "0.0.0.0" else ("255.255.255.255", 68)
+                    self.tx_sock.sendto(reply, dest)
+                    log_success(f"DHCP: Received REQUEST from [{mac}]. Leased {self.client_ip} successfully!")
+                    self.leased = True
+
+            except Exception:
+                if not self.running:
+                    break
+
+
+def find_windows_ncm_adapter() -> Optional[dict]:
+    """Finds the Windows network adapter corresponding to the USB NCM gadget."""
+    if os.name != "nt":
+        return None
+    try:
+        ps_cmd = (
+            "Get-NetAdapter | Where-Object { "
+            "$_.InterfaceDescription -match 'UsbNcm|NCM' "
+            "} | Select-Object Name,InterfaceDescription,ifIndex,MacAddress,Status | "
+            "ConvertTo-Json"
+        )
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout.strip())
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            elif isinstance(data, dict):
+                return data
+    except Exception as e:
+        log_warn(f"Failed to query Windows network adapters: {e}")
+    return None
+
+
+def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
+    """Ensures inbound UDP port 67 and USB subnet traffic are permitted through Windows Defender Firewall."""
+    if os.name != "nt":
+        return True
+    try:
+        rules_needed = []
+        for rule_name in ["Gnirehtet DHCP", "Gnirehtet Subnet"]:
+            chk = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if rule_name not in chk.stdout:
+                rules_needed.append(rule_name)
+
+        if not rules_needed:
+            return True
+
+        log_info(f"Configuring Windows Firewall rules ({', '.join(rules_needed)})...")
+        # Try direct commands first (succeeds if running as admin)
+        all_ok = True
+        for r in rules_needed:
+            if r == "Gnirehtet DHCP":
+                cmd = ["netsh", "advfirewall", "firewall", "add", "rule", "name=Gnirehtet DHCP", "dir=in", "action=allow", "protocol=UDP", "localport=67", "profile=any"]
+            else:
+                cmd = ["netsh", "advfirewall", "firewall", "add", "rule", "name=Gnirehtet Subnet", "dir=in", "action=allow", f"remoteip={subnet_cidr}", "profile=any"]
+            res = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if res.returncode != 0:
+                all_ok = False
+
+        if all_ok:
+            log_success("Windows Firewall rules added successfully.")
+            return True
+
+        # If elevation needed, trigger one-time UAC prompt to add missing rules
+        log_info("Requesting administrator elevation to add Windows Firewall rules...")
+        uac_script = (
+            f'netsh advfirewall firewall add rule name=\\"Gnirehtet DHCP\\" dir=in action=allow protocol=UDP localport=67 profile=any; '
+            f'netsh advfirewall firewall add rule name=\\"Gnirehtet Subnet\\" dir=in action=allow remoteip={subnet_cidr} profile=any'
+        )
+        uac_cmd = f'Start-Process cmd -ArgumentList "/c {uac_script}" -Verb RunAs -Wait'
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", uac_cmd],
+            capture_output=True,
+            timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        time.sleep(0.5)
+
+        log_success("Windows Firewall rules configured.")
+        return True
+    except Exception as e:
+        log_warn(f"Firewall rule check failed: {e}")
+    return False
+
+
+def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix_len: int = 24) -> bool:
+    """Ensures the Windows UsbNcm adapter is assigned the static IP and firewall rule is active."""
+    if os.name != "nt":
+        return True
+
+    adapter_name = adapter.get("Name", "")
+    if_index = adapter.get("ifIndex")
+
+    # 1. Ensure Windows Firewall permits UDP 67 and Subnet traffic
+    ensure_windows_firewall_rules()
+
+    # 2. Check if IP is already configured
+    try:
+        chk_cmd = f"Get-NetIPAddress -InterfaceIndex {if_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
+        chk_res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", chk_cmd],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if ip in chk_res.stdout:
+            # Mark network as Private so firewall doesn't block local traffic
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            return True
+    except Exception:
+        pass
+
+    # 3. Try configuring via PowerShell / Netsh
+    log_info(f"Assigning static IP {ip}/{prefix_len} to Windows adapter '{adapter_name}'...")
+    cfg_cmd = (
+        f"Get-NetIPAddress -InterfaceIndex {if_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue; "
+        f"Set-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 -Dhcp Disabled -ErrorAction SilentlyContinue; "
+        f"New-NetIPAddress -InterfaceIndex {if_index} -IPAddress {ip} -PrefixLength {prefix_len} -ErrorAction SilentlyContinue; "
+        f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"
+    )
+    res = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", cfg_cmd],
+        capture_output=True,
+        text=True,
+        timeout=6,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    if res.returncode == 0:
+        return True
+
+    # 4. If unelevated, attempt netsh with UAC elevation
+    try:
+        netsh_args = f'interface ipv4 set address name="{adapter_name}" static {ip} 255.255.255.0'
+        uac_cmd = f'Start-Process netsh -ArgumentList \'{netsh_args}\' -Verb RunAs -Wait'
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", uac_cmd],
+            capture_output=True,
+            timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        time.sleep(1.0)
+        # Verify again
+        chk_res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", chk_cmd],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if ip in chk_res.stdout:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            return True
+    except Exception as e:
+        log_warn(f"Failed to elevate adapter IP configuration: {e}")
+
+    return False
+
+
 class GnirehtetSupervisor:
     def __init__(
         self,
@@ -202,6 +560,9 @@ class GnirehtetSupervisor:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         legacy: bool = False,
         host: Optional[str] = None,
+        pc_ip: str = DEFAULT_PC_IP,
+        headset_ip: str = DEFAULT_HEADSET_IP,
+        verbose: bool = False,
     ):
         self.port = port
         self.target_serial = serial or os.getenv("ANDROID_SERIAL")
@@ -212,6 +573,10 @@ class GnirehtetSupervisor:
         self.poll_interval = poll_interval
         self.legacy = legacy
         self.host_override = host
+        self.pc_ip = pc_ip
+        self.headset_ip = headset_ip
+        self.verbose = verbose
+        self.dhcp_server: Optional[UsbNcmDhcpServer] = None
         self.active_native_mode = False
 
         self.relay_process: Optional[subprocess.Popen] = None
@@ -279,6 +644,25 @@ class GnirehtetSupervisor:
             bufsize=1,
             creationflags=HIGH_PRIORITY_CLASS
         )
+
+        def _drain_relay_stdout(proc):
+            try:
+                for line in iter(proc.stdout.readline, ""):
+                    if not line:
+                        break
+                    clean_line = line.strip()
+                    if not clean_line:
+                        continue
+                    # Print connection lifecycle and packet stream in real time
+                    if self.verbose:
+                        print(f"[{time.strftime('%H:%M:%S')}] {Colors.CYAN}[RELAY]{Colors.RESET} {clean_line}")
+                    elif any(k in clean_line for k in ["Open", "Close", "connected", "disconnected", "dropped", "ERROR", "Exception", "WARN"]):
+                        print(f"[{time.strftime('%H:%M:%S')}] {Colors.CYAN}[RELAY]{Colors.RESET} {clean_line}")
+            except Exception:
+                pass
+
+        threading.Thread(target=_drain_relay_stdout, args=(self.relay_process,), daemon=True, name="RelayDrainer").start()
+
         time.sleep(0.8)
         if self.is_relay_listening():
             log_success("Relay server successfully started and listening.")
@@ -366,17 +750,85 @@ class GnirehtetSupervisor:
 
         return None
 
+    def ensure_ncm_link(self, serial: str) -> Optional[str]:
+        """Configures native USB CDC-NCM gadget on device and serves DHCP to establish high-speed link."""
+        if self.legacy:
+            return None
+        if self.host_override:
+            return self.host_override
+
+        log_info(f"Checking USB function status on [{serial}]...")
+        code, funcs = self.run_adb(["-s", serial, "shell", "svc", "usb", "getFunctions"])
+        if "ncm" not in funcs:
+            log_info(f"Switching USB gadget to high-speed NCM on [{serial}]...")
+            code, out = self.run_adb(["-s", serial, "shell", "svc", "usb", "setFunctions", "ncm"])
+            if code != 0 and "setCurrentFunctions opId" not in out:
+                log_warn(f"Failed to set USB function to NCM: {out}")
+                return None
+            time.sleep(2.0)
+
+        # On Windows, locate the UsbNcm adapter, configure IP, and start DHCP
+        if os.name == "nt":
+            adapter = None
+            log_info("Locating Windows 'UsbNcm Host Device' network adapter...")
+            for _ in range(15):
+                adapter = find_windows_ncm_adapter()
+                if adapter and adapter.get("Status") == "Up":
+                    break
+                time.sleep(1.0)
+
+            if not adapter:
+                log_warn("Windows UsbNcm network adapter was not found or is not Up.")
+                return None
+
+            log_success(f"Windows UsbNcm adapter detected: '{adapter.get('Name')}' (ifIndex: {adapter.get('ifIndex')})")
+
+            # Configure static IP on Windows adapter
+            configured = configure_windows_ncm_adapter(adapter, self.pc_ip)
+            if not configured:
+                log_warn("Failed to set static IP on Windows UsbNcm adapter.")
+                return None
+
+            # Start Python DHCP server
+            if not self.dhcp_server or not self.dhcp_server.running:
+                self.dhcp_server = UsbNcmDhcpServer(
+                    server_ip=self.pc_ip,
+                    client_ip=self.headset_ip,
+                    pc_mac=adapter.get("MacAddress"),
+                )
+                self.dhcp_server.start()
+
+            # Wait for headset to take lease on usb0
+            log_info("Waiting for headset to accept DHCP lease on usb0...")
+            leased = False
+            for _ in range(15):
+                code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"])
+                if code == 0 and self.headset_ip in addr_out:
+                    leased = True
+                    break
+                time.sleep(1.0)
+
+            if leased:
+                log_success(f"Headset leased {self.headset_ip} on usb0 successfully! Native 3.8 Gbps USB pipeline active.")
+                return self.pc_ip
+            else:
+                log_warn("Headset did not acquire DHCP lease on usb0 within timeout.")
+                return None
+        else:
+            return self.detect_relay_host_ip(serial)
+
     def check_tunnel_health(self, serial: str) -> bool:
         """Verifies if the tether connection is active and healthy."""
+        code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
+        if code != 0 or not out.strip():
+            return False
+
         if self.active_native_mode:
-            code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
-            return code == 0 and bool(out.strip())
+            code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"])
+            return code == 0 and self.headset_ip in addr_out
         else:
             code, out = self.run_adb(["-s", serial, "reverse", "--list"])
-            if code != 0 or "localabstract:gnirehtet" not in out:
-                return False
-            code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
-            return code == 0 and bool(out.strip())
+            return code == 0 and "localabstract:gnirehtet" in out
 
     def setup_headset_tether(self, serial: str) -> bool:
         """Sets up high-speed Native USB transport or fallback legacy reverse tunnel."""
@@ -408,12 +860,13 @@ class GnirehtetSupervisor:
             log_info("Legacy mode specified (--legacy). Using ADB reverse tunnel...")
             self.active_native_mode = False
         else:
-            relay_host = self.detect_relay_host_ip(serial)
+            log_info("Attempting high-speed Native USB (CDC-NCM) connection...")
+            relay_host = self.ensure_ncm_link(serial)
             if relay_host:
-                log_success(f"Native USB network detected (PC host IP: {relay_host}). Using direct CDC-NCM transport!")
+                log_success(f"Native USB active! Direct TCP target: {relay_host}:{self.port}")
                 self.active_native_mode = True
             else:
-                log_warn("Native USB network interface not found on device (is 'USB connection for apps' enabled in Quest Settings > Link?). Falling back to legacy ADB reverse tunnel...")
+                log_warn("Native USB unavailable. Falling back to verified legacy ADB reverse tunnel...")
                 self.active_native_mode = False
 
         if not self.active_native_mode:
@@ -433,6 +886,7 @@ class GnirehtetSupervisor:
             "shell", "am", "start",
             "-a", "com.genymobile.gnirehtet.START",
             "-n", "com.genymobile.gnirehtet/.GnirehtetActivity",
+            "--esa", "dnsServers", "1.1.1.1,8.8.8.8",
         ]
         if self.active_native_mode and relay_host:
             intent_cmd.extend(["-e", "relayHost", relay_host, "--ei", "relayPort", str(self.port)])
@@ -452,6 +906,9 @@ class GnirehtetSupervisor:
         log_info(f"Tearing down tether on [{serial}]...")
         self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
         self.run_adb(["-s", serial, "reverse", "--remove-all"])
+        if self.dhcp_server:
+            self.dhcp_server.stop()
+            self.dhcp_server = None
 
     def handle_disconnect(self):
         """Handles link drop and state reset."""
@@ -459,6 +916,9 @@ class GnirehtetSupervisor:
             log_warn("Device disconnected or cable wiggled! Auto-recovery active...")
             self.is_connected = False
             self.current_serial = None
+            if self.dhcp_server:
+                self.dhcp_server.stop()
+                self.dhcp_server = None
 
     def supervisor_loop(self):
         """Main resilient supervision loop."""
@@ -485,9 +945,9 @@ class GnirehtetSupervisor:
 
         while self.running:
             try:
-                # 1. Ensure relay server is alive
-                if not self.is_relay_listening():
-                    log_warn("Relay server is not listening. Restarting...")
+                # 1. Ensure relay server process is alive
+                if not self.relay_process or self.relay_process.poll() is not None:
+                    log_warn("Relay server process is not running. Restarting...")
                     self.start_relay_server()
 
                 # 2. Check connected devices
@@ -540,6 +1000,9 @@ class GnirehtetSupervisor:
         log_info("Shutting down supervisor...")
         if self.current_serial:
             self.teardown_headset_tether(self.current_serial)
+        if self.dhcp_server:
+            self.dhcp_server.stop()
+            self.dhcp_server = None
         self.stop_relay_server()
         log_success("Supervisor exited cleanly.")
 
@@ -553,10 +1016,13 @@ def parse_args():
     parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT, help="Relay server port")
     parser.add_argument("--legacy", action="store_true", help="Force legacy ADB reverse tunnel instead of native USB CDC-NCM")
     parser.add_argument("--host", help="Custom PC host IP for Native USB mode (auto-detected if omitted)")
+    parser.add_argument("--pc-ip", default=DEFAULT_PC_IP, help="PC static IP on NCM adapter (default: 192.168.42.1)")
+    parser.add_argument("--headset-ip", default=DEFAULT_HEADSET_IP, help="Headset DHCP IP on NCM link (default: 192.168.42.2)")
     parser.add_argument("--adb", help="Path to adb executable (defaults to auto-detect)")
     parser.add_argument("--java", help="Path to java executable (defaults to auto-detect)")
     parser.add_argument("--jar", help="Path to gnirehtet.jar (defaults to auto-detect)")
     parser.add_argument("--jvm-args", help="Custom JVM arguments (e.g. '-XX:+UseZGC -Xms1g -Xmx1g')")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose relay and packet activity logging")
     parser.add_argument("--interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Device polling interval (seconds)")
     return parser.parse_args()
 
@@ -575,6 +1041,9 @@ def main():
         poll_interval=args.interval,
         legacy=args.legacy,
         host=args.host,
+        pc_ip=args.pc_ip,
+        headset_ip=args.headset_ip,
+        verbose=args.verbose,
     )
 
     def sig_handler(sig, frame):
