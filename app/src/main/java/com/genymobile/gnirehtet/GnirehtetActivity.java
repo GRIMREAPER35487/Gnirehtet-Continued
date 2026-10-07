@@ -23,6 +23,9 @@ public class GnirehtetActivity extends Activity {
 
     public static final String EXTRA_DNS_SERVERS = "dnsServers";
     public static final String EXTRA_ROUTES = "routes";
+    public static final String EXTRA_RELAY_HOST = "relayHost";
+    public static final String EXTRA_RELAY_PORT = "relayPort";
+    private static final int DEFAULT_PORT = 31416;
 
     private static final int VPN_REQUEST_CODE = 0;
 
@@ -59,7 +62,9 @@ public class GnirehtetActivity extends Activity {
         if (routes == null) {
             routes = new String[0];
         }
-        return new VpnConfiguration(Net.toInetAddresses(dnsServers), Net.toCIDRs(routes));
+        String relayHost = intent.getStringExtra(EXTRA_RELAY_HOST);
+        int relayPort = intent.getIntExtra(EXTRA_RELAY_PORT, DEFAULT_PORT);
+        return new VpnConfiguration(Net.toInetAddresses(dnsServers), Net.toCIDRs(routes), relayHost, relayPort);
     }
 
     private boolean startGnirehtet(VpnConfiguration config) {

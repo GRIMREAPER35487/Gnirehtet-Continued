@@ -200,6 +200,8 @@ class GnirehtetSupervisor:
         jar_path: Optional[str] = None,
         jvm_args: Optional[List[str]] = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        legacy: bool = False,
+        host: Optional[str] = None,
     ):
         self.port = port
         self.target_serial = serial or os.getenv("ANDROID_SERIAL")
@@ -208,6 +210,9 @@ class GnirehtetSupervisor:
         self.jar = find_jar(jar_path)
         self.jvm_args = jvm_args if jvm_args is not None else get_default_jvm_args(self.java)
         self.poll_interval = poll_interval
+        self.legacy = legacy
+        self.host_override = host
+        self.active_native_mode = False
 
         self.relay_process: Optional[subprocess.Popen] = None
         self.current_serial: Optional[str] = None
@@ -303,16 +308,79 @@ class GnirehtetSupervisor:
                 devices.append((parts[0], parts[1]))
         return devices
 
+    def detect_relay_host_ip(self, serial: str) -> Optional[str]:
+        """Detects the PC host IP address on the native USB network interface."""
+        if self.host_override:
+            return self.host_override
+
+        # 1. Query device routing table
+        code, out = self.run_adb(["-s", serial, "shell", "ip", "route"])
+        if code == 0 and out:
+            # Check for routes with a gateway on a usb/ncm/rndis/eth interface
+            # e.g., "default via 192.168.137.1 dev usb0" or "192.168.137.0/24 via 192.168.137.1 dev ncm0"
+            for line in out.splitlines():
+                line = line.strip()
+                m_gw = re.search(r"via\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+dev\s+(usb\w*|ncm\w*|rndis\w*|eth\w*)", line)
+                if m_gw:
+                    return m_gw.group(1)
+
+        # 2. Query ARP table / neighbor cache for usb/ncm/rndis/eth interfaces
+        code, out = self.run_adb(["-s", serial, "shell", "cat", "/proc/net/arp"])
+        if code == 0 and out:
+            # Format: IP address HW type Flags HW address Mask Device
+            for line in out.splitlines()[1:]:
+                parts = line.strip().split()
+                if len(parts) >= 6:
+                    ip_addr, dev = parts[0], parts[5]
+                    if re.match(r"^(usb\w*|ncm\w*|rndis\w*|eth\w*)$", dev):
+                        if re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", ip_addr) and ip_addr != "0.0.0.0":
+                            return ip_addr
+
+        # 3. Query ip neigh show
+        code, out = self.run_adb(["-s", serial, "shell", "ip", "neigh", "show"])
+        if code == 0 and out:
+            for line in out.splitlines():
+                m_neigh = re.search(r"^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+dev\s+(usb\w*|ncm\w*|rndis\w*|eth\w*)", line.strip())
+                if m_neigh:
+                    return m_neigh.group(1)
+
+        # 4. Check interface IPv4 addresses directly and infer host IP on point-to-point subnet
+        code, out = self.run_adb(["-s", serial, "shell", "ip", "-4", "addr", "show"])
+        if code == 0 and out:
+            current_dev = None
+            for line in out.splitlines():
+                line = line.strip()
+                dev_match = re.match(r"^\d+:\s+([a-zA-Z0-9_\-]+):", line)
+                if dev_match:
+                    current_dev = dev_match.group(1)
+                elif current_dev and re.match(r"^(usb\w*|ncm\w*|rndis\w*|eth\w*)$", current_dev):
+                    inet_match = re.search(r"inet\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/(\d+)", line)
+                    if inet_match:
+                        device_ip = inet_match.group(1)
+                        octets = device_ip.split(".")
+                        last_octet = int(octets[3])
+                        # In typical point-to-point links (e.g. 192.168.137.x), host is .1 if device is not .1, else .2
+                        host_last = 1 if last_octet != 1 else 2
+                        inferred_host = f"{octets[0]}.{octets[1]}.{octets[2]}.{host_last}"
+                        return inferred_host
+
+        return None
+
     def check_tunnel_health(self, serial: str) -> bool:
-        """Verifies if adb reverse tunnel is active."""
-        code, out = self.run_adb(["-s", serial, "reverse", "--list"])
-        if code != 0:
-            return False
-        return "localabstract:gnirehtet" in out
+        """Verifies if the tether connection is active and healthy."""
+        if self.active_native_mode:
+            code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
+            return code == 0 and bool(out.strip())
+        else:
+            code, out = self.run_adb(["-s", serial, "reverse", "--list"])
+            if code != 0 or "localabstract:gnirehtet" not in out:
+                return False
+            code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
+            return code == 0 and bool(out.strip())
 
     def setup_headset_tether(self, serial: str) -> bool:
-        """Sets up reverse tunnel and starts Android VPN service."""
-        log_info(f"Device connected: [{serial}]. Configuring reverse tether...")
+        """Sets up high-speed Native USB transport or fallback legacy reverse tunnel."""
+        log_info(f"Device connected: [{serial}]. Configuring tether...")
 
         # 1. Verify APK is installed on the device; auto-install if missing
         code, out = self.run_adb(["-s", serial, "shell", "pm", "path", "com.genymobile.gnirehtet"])
@@ -334,12 +402,30 @@ class GnirehtetSupervisor:
         # 2. Stop any stale instance
         self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
-        # 3. Reset reverse tunnels and establish new one
-        self.run_adb(["-s", serial, "reverse", "--remove-all"])
-        code, out = self.run_adb(["-s", serial, "reverse", "localabstract:gnirehtet", f"tcp:{self.port}"])
-        if code != 0:
-            log_error(f"Failed to set adb reverse: {out}")
-            return False
+        # 3. Determine transport mode: Native USB (default) vs Legacy ADB reverse
+        relay_host: Optional[str] = None
+        if self.legacy:
+            log_info("Legacy mode specified (--legacy). Using ADB reverse tunnel...")
+            self.active_native_mode = False
+        else:
+            relay_host = self.detect_relay_host_ip(serial)
+            if relay_host:
+                log_success(f"Native USB network detected (PC host IP: {relay_host}). Using direct CDC-NCM transport!")
+                self.active_native_mode = True
+            else:
+                log_warn("Native USB network interface not found on device (is 'USB connection for apps' enabled in Quest Settings > Link?). Falling back to legacy ADB reverse tunnel...")
+                self.active_native_mode = False
+
+        if not self.active_native_mode:
+            # Legacy mode: Reset reverse tunnels and establish new one
+            self.run_adb(["-s", serial, "reverse", "--remove-all"])
+            code, out = self.run_adb(["-s", serial, "reverse", "localabstract:gnirehtet", f"tcp:{self.port}"])
+            if code != 0:
+                log_error(f"Failed to set adb reverse: {out}")
+                return False
+        else:
+            # Native USB mode: Clean up any old adb reverse tunnels
+            self.run_adb(["-s", serial, "reverse", "--remove-all"])
 
         # 4. Start the VPN intent on Android
         intent_cmd = [
@@ -348,12 +434,17 @@ class GnirehtetSupervisor:
             "-a", "com.genymobile.gnirehtet.START",
             "-n", "com.genymobile.gnirehtet/.GnirehtetActivity",
         ]
+        if self.active_native_mode and relay_host:
+            intent_cmd.extend(["-e", "relayHost", relay_host, "--ei", "relayPort", str(self.port)])
+
         code, out = self.run_adb(intent_cmd)
         if code != 0:
             log_error(f"Failed to start Android VPN service: {out}")
             return False
 
-        log_success(f"Reverse tether active and running on [{serial}]!")
+        time.sleep(0.5)
+        mode_desc = f"Native USB [Direct IP {relay_host}:{self.port}]" if self.active_native_mode else "Legacy ADB Reverse"
+        log_success(f"Tether active and running on [{serial}] via {mode_desc}!")
         return True
 
     def teardown_headset_tether(self, serial: str):
@@ -380,6 +471,10 @@ class GnirehtetSupervisor:
         log_info(f"Java:  {self.java}")
         log_info(f"JAR:   {self.jar}")
         log_info(f"Port:  {self.port}")
+        mode_str = "Legacy ADB Reverse" if self.legacy else "Native USB (CDC-NCM / Direct IP) [Default]"
+        log_info(f"Mode:  {mode_str}")
+        if self.host_override:
+            log_info(f"Host:  {self.host_override}")
         if self.target_serial:
             log_info(f"Target Serial: {self.target_serial}")
 
@@ -456,6 +551,8 @@ def parse_args():
     )
     parser.add_argument("-s", "--serial", help="Specific device serial (defaults to auto-detecting first device)")
     parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT, help="Relay server port")
+    parser.add_argument("--legacy", action="store_true", help="Force legacy ADB reverse tunnel instead of native USB CDC-NCM")
+    parser.add_argument("--host", help="Custom PC host IP for Native USB mode (auto-detected if omitted)")
     parser.add_argument("--adb", help="Path to adb executable (defaults to auto-detect)")
     parser.add_argument("--java", help="Path to java executable (defaults to auto-detect)")
     parser.add_argument("--jar", help="Path to gnirehtet.jar (defaults to auto-detect)")
@@ -476,6 +573,8 @@ def main():
         jar_path=args.jar,
         jvm_args=jvm_args,
         poll_interval=args.interval,
+        legacy=args.legacy,
+        host=args.host,
     )
 
     def sig_handler(sig, frame):

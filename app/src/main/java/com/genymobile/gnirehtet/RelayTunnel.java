@@ -24,54 +24,76 @@ import android.util.Log;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 
 public final class RelayTunnel implements Tunnel {
 
     private static final String TAG = RelayTunnel.class.getSimpleName();
 
     private static final String LOCAL_ABSTRACT_NAME = "gnirehtet";
+    private static final int BUFFER_SIZE = 2 * 1024 * 1024;
+    private static final int CONNECT_TIMEOUT_MS = 5000;
 
-    private final LocalSocket localSocket = new LocalSocket();
+    private final VpnService vpnService;
+    private final String relayHost;
+    private final int relayPort;
 
-    private RelayTunnel() {
-        // exposed through open() static method
+    private LocalSocket localSocket;
+    private Socket tcpSocket;
+    private InputStream inputStream;
+    private OutputStream outputStream;
+
+    private RelayTunnel(VpnService vpnService, String relayHost, int relayPort) {
+        this.vpnService = vpnService;
+        this.relayHost = relayHost;
+        this.relayPort = relayPort;
     }
 
-    @SuppressWarnings("unused")
     public static RelayTunnel open(VpnService vpnService) throws IOException {
-        Log.d(TAG, "Opening a new relay tunnel...");
-        // since we use a local socket, we don't need to protect the socket from the vpnService anymore
-        // but this is an implementation detail, so keep the method signature
-        return new RelayTunnel();
+        return open(vpnService, null, 0);
+    }
+
+    public static RelayTunnel open(VpnService vpnService, String relayHost, int relayPort) throws IOException {
+        Log.d(TAG, "Opening a new relay tunnel (host=" + relayHost + ", port=" + relayPort + ")...");
+        return new RelayTunnel(vpnService, relayHost, relayPort);
     }
 
     public void connect() throws IOException {
-        localSocket.connect(new LocalSocketAddress(LOCAL_ABSTRACT_NAME));
-        localSocket.setReceiveBufferSize(2 * 1024 * 1024);
-        localSocket.setSendBufferSize(2 * 1024 * 1024);
-        readClientId(localSocket.getInputStream());
+        if (relayHost != null && !relayHost.isEmpty()) {
+            Log.i(TAG, "Connecting to Native USB relay at " + relayHost + ":" + relayPort);
+            tcpSocket = new Socket();
+            tcpSocket.setTcpNoDelay(true);
+            tcpSocket.setReceiveBufferSize(BUFFER_SIZE);
+            tcpSocket.setSendBufferSize(BUFFER_SIZE);
+            if (vpnService != null) {
+                vpnService.protect(tcpSocket);
+            }
+            tcpSocket.connect(new InetSocketAddress(relayHost, relayPort), CONNECT_TIMEOUT_MS);
+            inputStream = tcpSocket.getInputStream();
+            outputStream = tcpSocket.getOutputStream();
+        } else {
+            Log.i(TAG, "Connecting to legacy ADB reverse socket: " + LOCAL_ABSTRACT_NAME);
+            localSocket = new LocalSocket();
+            localSocket.setReceiveBufferSize(BUFFER_SIZE);
+            localSocket.setSendBufferSize(BUFFER_SIZE);
+            localSocket.connect(new LocalSocketAddress(LOCAL_ABSTRACT_NAME));
+            inputStream = localSocket.getInputStream();
+            outputStream = localSocket.getOutputStream();
+        }
+        readClientId(inputStream);
     }
 
     /**
-     * The relay server is accessible through an "adb reverse" port redirection.
-     * <p>
-     * If the port redirection is enabled but the relay server is not started, then the call to
-     * channel.connect() will succeed, but the first read() will return -1.
-     * <p>
-     * As a consequence, the connection state of the relay server would be invalid temporarily (we
-     * would switch to CONNECTED state then switch back to DISCONNECTED).
-     * <p>
-     * To avoid this problem, we must actually read from the server, so that an error occurs
-     * immediately if the relay server is not accessible.
-     * <p>
-     * Therefore, the relay server immediately sends the client id: consume it and log it.
+     * The relay server sends the client id immediately upon connection.
      *
-     * @param inputStream the input stream to receive data from the relay server
+     * @param in the input stream to receive data from the relay server
      * @throws IOException if an I/O error occurs
      */
-    private static void readClientId(InputStream inputStream) throws IOException {
+    private static void readClientId(InputStream in) throws IOException {
         Log.d(TAG, "Requesting client id");
-        int clientId = new DataInputStream(inputStream).readInt();
+        int clientId = new DataInputStream(in).readInt();
         Log.d(TAG, "Connected to the relay server as #" + Binary.unsigned(clientId));
     }
 
@@ -80,12 +102,12 @@ public final class RelayTunnel implements Tunnel {
         if (GnirehtetService.VERBOSE) {
             Log.v(TAG, "Sending packet: " + Binary.buildPacketString(packet, len));
         }
-        localSocket.getOutputStream().write(packet, 0, len);
+        outputStream.write(packet, 0, len);
     }
 
     @Override
     public int receiveTo(byte[] buffer, int offset, int maxLen) throws IOException {
-        int r = localSocket.getInputStream().read(buffer, offset, maxLen);
+        int r = inputStream.read(buffer, offset, maxLen);
         if (GnirehtetService.VERBOSE) {
             Log.v(TAG, "Receiving packet: " + r + " bytes");
         }
@@ -95,14 +117,19 @@ public final class RelayTunnel implements Tunnel {
     @Override
     public void close() {
         try {
-            if (localSocket.getFileDescriptor() != null) {
-                // close the streams to interrupt pending read and writes
-                localSocket.shutdownInput();
-                localSocket.shutdownOutput();
+            if (tcpSocket != null) {
+                tcpSocket.close();
+                tcpSocket = null;
             }
-            localSocket.close();
+            if (localSocket != null) {
+                if (localSocket.getFileDescriptor() != null) {
+                    localSocket.shutdownInput();
+                    localSocket.shutdownOutput();
+                }
+                localSocket.close();
+                localSocket = null;
+            }
         } catch (IOException e) {
-            // what could we do?
             throw new RuntimeException(e);
         }
     }

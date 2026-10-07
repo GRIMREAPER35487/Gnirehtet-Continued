@@ -105,7 +105,7 @@ public class GnirehtetService extends VpnService {
     private void startVpn(VpnConfiguration config) {
         notifier.start();
         if (setupVpn(config)) {
-            startForwarding();
+            startForwarding(config);
         }
     }
 
@@ -179,8 +179,9 @@ public class GnirehtetService extends VpnService {
         return null;
     }
 
-    private void startForwarding() {
-        forwarder = new Forwarder(this, vpnInterface.getFileDescriptor(), new RelayTunnelListener(handler));
+    private void startForwarding(VpnConfiguration config) {
+        forwarder = new Forwarder(this, vpnInterface.getFileDescriptor(), new RelayTunnelListener(handler),
+                config.getRelayHost(), config.getRelayPort());
         forwarder.forward();
     }
 

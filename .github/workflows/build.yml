@@ -146,3 +146,4 @@ jobs:
             bundle/gnirehtet.apk
             bundle/gnirehtet.jar
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -26,15 +26,22 @@ public class VpnConfiguration implements Parcelable {
 
     private final InetAddress[] dnsServers;
     private final CIDR[] routes;
+    private final String relayHost;
+    private final int relayPort;
 
     public VpnConfiguration() {
-        this.dnsServers = new InetAddress[0];
-        this.routes = new CIDR[0];
+        this(new InetAddress[0], new CIDR[0], null, 0);
     }
 
     public VpnConfiguration(InetAddress[] dnsServers, CIDR[] routes) {
+        this(dnsServers, routes, null, 0);
+    }
+
+    public VpnConfiguration(InetAddress[] dnsServers, CIDR[] routes, String relayHost, int relayPort) {
         this.dnsServers = dnsServers;
         this.routes = routes;
+        this.relayHost = relayHost;
+        this.relayPort = relayPort;
     }
 
     private VpnConfiguration(Parcel source) {
@@ -48,6 +55,8 @@ public class VpnConfiguration implements Parcelable {
             throw new AssertionError("Invalid address", e);
         }
         routes = source.createTypedArray(CIDR.CREATOR);
+        relayHost = source.readString();
+        relayPort = source.readInt();
     }
 
     public InetAddress[] getDnsServers() {
@@ -58,6 +67,14 @@ public class VpnConfiguration implements Parcelable {
         return routes;
     }
 
+    public String getRelayHost() {
+        return relayHost;
+    }
+
+    public int getRelayPort() {
+        return relayPort;
+    }
+
     @Override
     public void writeToParcel(Parcel dest, int flags) {
         dest.writeInt(dnsServers.length);
@@ -65,6 +82,8 @@ public class VpnConfiguration implements Parcelable {
             dest.writeByteArray(addr.getAddress());
         }
         dest.writeTypedArray(routes, 0);
+        dest.writeString(relayHost);
+        dest.writeInt(relayPort);
     }
 
     @Override

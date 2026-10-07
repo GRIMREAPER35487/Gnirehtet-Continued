@@ -50,8 +50,13 @@ public class Forwarder {
     private Future<?> tunnelToDeviceFuture;
 
     public Forwarder(VpnService vpnService, FileDescriptor vpnFileDescriptor, RelayTunnelListener listener) {
+        this(vpnService, vpnFileDescriptor, listener, null, 0);
+    }
+
+    public Forwarder(VpnService vpnService, FileDescriptor vpnFileDescriptor, RelayTunnelListener listener,
+                     String relayHost, int relayPort) {
         this.vpnFileDescriptor = vpnFileDescriptor;
-        tunnel = new PersistentRelayTunnel(vpnService, listener);
+        tunnel = new PersistentRelayTunnel(vpnService, listener, relayHost, relayPort);
     }
 
     public void forward() {
