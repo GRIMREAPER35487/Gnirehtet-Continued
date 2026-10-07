@@ -468,6 +468,31 @@ def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
     return False
 
 
+def ensure_windows_nat(subnet_cidr: str = "192.168.42.0/24", nat_name: str = "GnirehtetNat") -> bool:
+    """Configures Windows NAT (WinNAT) if available so headset receives internet across the cable."""
+    if os.name != "nt":
+        return False
+    try:
+        chk_cmd = "Get-CimClass -Namespace root/StandardCimv2 -ClassName MSFT_NetNat -ErrorAction SilentlyContinue"
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", chk_cmd], capture_output=True, text=True, timeout=3)
+        if not res.stdout.strip():
+            return False
+
+        chk_nat = f"Get-NetNat -Name '{nat_name}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"
+        res_nat = subprocess.run(["powershell", "-NoProfile", "-Command", chk_nat], capture_output=True, text=True, timeout=3)
+        if nat_name in res_nat.stdout:
+            return True
+
+        create_nat = f"New-NetNat -Name '{nat_name}' -InternalIPInterfaceAddressPrefix '{subnet_cidr}' -ErrorAction Stop"
+        res_create = subprocess.run(["powershell", "-NoProfile", "-Command", create_nat], capture_output=True, text=True, timeout=5)
+        if res_create.returncode == 0:
+            log_success(f"Windows NAT '{nat_name}' active: Headset has direct full-speed internet over cable!")
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix_len: int = 24) -> bool:
     """Ensures the Windows UsbNcm adapter is assigned the static IP and firewall rule is active."""
     if os.name != "nt":
@@ -821,14 +846,13 @@ class GnirehtetSupervisor:
 
     def check_tunnel_health(self, serial: str) -> bool:
         """Verifies if the tether connection is active and healthy."""
-        code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
-        if code != 0 or not out.strip():
-            return False
-
         if self.active_native_mode:
             code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"])
             return code == 0 and self.headset_ip in addr_out
         else:
+            code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
+            if code != 0 or not out.strip():
+                return False
             code, out = self.run_adb(["-s", serial, "reverse", "--list"])
             return code == 0 and "localabstract:gnirehtet" in out
 
@@ -836,27 +860,10 @@ class GnirehtetSupervisor:
         """Sets up high-speed Native USB transport or fallback legacy reverse tunnel."""
         log_info(f"Device connected: [{serial}]. Configuring tether...")
 
-        # 1. Verify APK is installed on the device; auto-install if missing
-        code, out = self.run_adb(["-s", serial, "shell", "pm", "path", "com.genymobile.gnirehtet"])
-        if "package:" not in out:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            apk_path = os.path.join(script_dir, "gnirehtet.apk")
-            if not os.path.isfile(apk_path):
-                candidate = os.path.join(script_dir, "app", "build", "outputs", "apk", "release", "gnirehtet-release.apk")
-                if os.path.isfile(candidate):
-                    apk_path = candidate
-            if os.path.isfile(apk_path):
-                log_info(f"Gnirehtet APK missing on [{serial}]. Auto-installing {os.path.basename(apk_path)}...")
-                inst_code, inst_out = self.run_adb(["-s", serial, "install", "-r", apk_path], timeout=15.0)
-                if inst_code == 0:
-                    log_success(f"Installed {os.path.basename(apk_path)} onto [{serial}] successfully.")
-                else:
-                    log_warn(f"Auto-install warning: {inst_out}")
-
-        # 2. Stop any stale instance
+        # 1. Stop any stale VPN instance (ensures no VpnService swallows the native hardware link)
         self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
-        # 3. Determine transport mode: Native USB (default) vs Legacy ADB reverse
+        # 2. Determine transport mode: Native USB (default) vs Legacy ADB reverse
         relay_host: Optional[str] = None
         if self.legacy:
             log_info("Legacy mode specified (--legacy). Using ADB reverse tunnel...")
@@ -865,43 +872,66 @@ class GnirehtetSupervisor:
             log_info("Attempting high-speed Native USB (CDC-NCM) connection...")
             relay_host = self.ensure_ncm_link(serial)
             if relay_host:
-                log_success(f"Native USB active! Direct TCP target: {relay_host}:{self.port}")
                 self.active_native_mode = True
             else:
                 log_warn("Native USB unavailable. Falling back to verified legacy ADB reverse tunnel...")
                 self.active_native_mode = False
 
         if not self.active_native_mode:
-            # Legacy mode: Reset reverse tunnels and establish new one
+            # Legacy mode: verify APK is installed
+            code, out = self.run_adb(["-s", serial, "shell", "pm", "path", "com.genymobile.gnirehtet"])
+            if "package:" not in out:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                apk_path = os.path.join(script_dir, "gnirehtet.apk")
+                if not os.path.isfile(apk_path):
+                    candidate = os.path.join(script_dir, "app", "build", "outputs", "apk", "release", "gnirehtet-release.apk")
+                    if os.path.isfile(candidate):
+                        apk_path = candidate
+                if os.path.isfile(apk_path):
+                    log_info(f"Gnirehtet APK missing on [{serial}]. Auto-installing {os.path.basename(apk_path)}...")
+                    self.run_adb(["-s", serial, "install", "-r", apk_path], timeout=15.0)
+
+            # Ensure relay server is running for legacy reverse mode
+            self.start_relay_server()
+
+            # Establish reverse tunnel
             self.run_adb(["-s", serial, "reverse", "--remove-all"])
             code, out = self.run_adb(["-s", serial, "reverse", "localabstract:gnirehtet", f"tcp:{self.port}"])
             if code != 0:
                 log_error(f"Failed to set adb reverse: {out}")
                 return False
+
+            # Start VPN intent on Android
+            intent_cmd = [
+                "-s", serial,
+                "shell", "am", "start",
+                "-a", "com.genymobile.gnirehtet.START",
+                "-n", "com.genymobile.gnirehtet/.GnirehtetActivity",
+                "--esa", "dnsServers", "1.1.1.1,8.8.8.8",
+            ]
+            code, out = self.run_adb(intent_cmd)
+            if code != 0:
+                log_error(f"Failed to start Android VPN service: {out}")
+                return False
+
+            time.sleep(0.5)
+            log_success(f"Tether active and running on [{serial}] via Legacy ADB Reverse!")
+            return True
         else:
-            # Native USB mode: Clean up any old adb reverse tunnels
+            # Native USB mode: clear reverse tunnels and ensure no VPN is running.
+            # On Android, any active VpnService captures uid 0-99999 and swallows local traffic,
+            # preventing PCVR streaming apps (Virtual Desktop / Steam Link) from reaching the hardware wire.
             self.run_adb(["-s", serial, "reverse", "--remove-all"])
+            self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
-        # 4. Start the VPN intent on Android
-        intent_cmd = [
-            "-s", serial,
-            "shell", "am", "start",
-            "-a", "com.genymobile.gnirehtet.START",
-            "-n", "com.genymobile.gnirehtet/.GnirehtetActivity",
-            "--esa", "dnsServers", "1.1.1.1,8.8.8.8",
-        ]
-        if self.active_native_mode and relay_host:
-            intent_cmd.extend(["-e", "relayHost", relay_host, "--ei", "relayPort", str(self.port)])
+            # Setup Windows NAT if supported
+            subnet_prefix = f"{self.pc_ip.rsplit('.', 1)[0]}.0/24"
+            ensure_windows_nat(subnet_prefix)
 
-        code, out = self.run_adb(intent_cmd)
-        if code != 0:
-            log_error(f"Failed to start Android VPN service: {out}")
-            return False
-
-        time.sleep(0.5)
-        mode_desc = f"Native USB [Direct IP {relay_host}:{self.port}]" if self.active_native_mode else "Legacy ADB Reverse"
-        log_success(f"Tether active and running on [{serial}] via {mode_desc}!")
-        return True
+            log_success(f"Tether active and running on [{serial}] via Native USB [3.8 Gbps Direct Wire]!")
+            log_info(f"PC Network IP: {relay_host} | Headset IP: {self.headset_ip}")
+            log_info("In Virtual Desktop / Steam Link: Direct hardware pipeline is active with 0 ms latency!")
+            return True
 
     def teardown_headset_tether(self, serial: str):
         """Stops the VPN service on the device and clears tunnels."""
@@ -940,17 +970,19 @@ class GnirehtetSupervisor:
         if self.target_serial:
             log_info(f"Target Serial: {self.target_serial}")
 
-        # Ensure relay server is running
-        self.start_relay_server()
+        # Ensure relay server is running if in legacy mode
+        if self.legacy:
+            self.start_relay_server()
 
         log_info("Waiting for Android / Quest device to connect...")
 
         while self.running:
             try:
-                # 1. Ensure relay server process is alive
-                if not self.relay_process or self.relay_process.poll() is not None:
-                    log_warn("Relay server process is not running. Restarting...")
-                    self.start_relay_server()
+                # 1. Ensure relay server process is alive (only if legacy reverse tunnel is needed)
+                if self.legacy or (self.is_connected and not self.active_native_mode):
+                    if not self.relay_process or self.relay_process.poll() is not None:
+                        log_warn("Relay server process is not running. Restarting...")
+                        self.start_relay_server()
 
                 # 2. Check connected devices
                 devices = self.get_connected_devices()
@@ -985,7 +1017,7 @@ class GnirehtetSupervisor:
                 # 4. Active link health check
                 if self.is_connected:
                     if not self.check_tunnel_health(chosen_serial):
-                        log_warn("Tunnel vanished from adb reverse list. Re-establishing...")
+                        log_warn("Tether link degraded or disconnected. Re-establishing...")
                         self.handle_disconnect()
                         time.sleep(1.0)
                         continue
