@@ -116,7 +116,9 @@ try {
     $pubCfg.EnableSharing(0)
     $privCfg.EnableSharing(1)
 } catch {
-    Write-Host "[WARN] Exception while applying COM sharing: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "[ERROR] Failed to enable Internet Connection Sharing: $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
 }
 
 # 6. Ensure Windows SharedAccess (ICS) service is enabled and running

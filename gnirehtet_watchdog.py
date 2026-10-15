@@ -304,18 +304,17 @@ class UsbNcmDhcpServer:
     def stop(self):
         """Stops the DHCP server and cleans up sockets."""
         self.running = False
-        if self.rx_sock:
-            try:
-                self.rx_sock.close()
-            except Exception:
-                pass
-        if self.tx_sock:
-            try:
-                self.tx_sock.close()
-            except Exception:
-                pass
-        if self.thread and self.thread.is_alive():
+        self._close_sockets()
+        if self.thread and self.thread.is_alive() and self.thread is not threading.current_thread():
             self.thread.join(timeout=1.0)
+
+    def _close_sockets(self):
+        for sock in (self.rx_sock, self.tx_sock):
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
         self.rx_sock = None
         self.tx_sock = None
 
@@ -324,9 +323,17 @@ class UsbNcmDhcpServer:
             self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            self.rx_sock.bind(("", 67))
+            # Bind to the NCM adapter address only: binding to all interfaces would answer
+            # DHCP requests from the LAN/Wi-Fi as well. On Windows, a socket bound to an
+            # interface address still receives the broadcasts arriving on that interface.
+            self.rx_sock.bind((self.server_ip, 67))
         except Exception as e:
-            log_info("UDP port 67 in use by Windows (SharedAccess / ICS active). Host ICS will serve DHCP lease.")
+            log_info(
+                f"UDP port 67 unavailable on {self.server_ip} ({e}); "
+                "assuming Windows SharedAccess / ICS will serve the DHCP lease."
+            )
+            self._close_sockets()
+            self.running = False
             return
 
         try:
@@ -339,6 +346,8 @@ class UsbNcmDhcpServer:
                 self.tx_sock.bind(("", 0))
         except Exception as e:
             log_warn(f"UsbNcmDhcpServer: Unable to bind TX socket: {e}")
+            self._close_sockets()
+            self.running = False
             return
 
         log_info(f"DHCP server active on UDP 67 (offering {self.client_ip} on subnet {self.server_ip})...")
@@ -415,8 +424,8 @@ def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
     """Ensures inbound UDP port 67 and USB subnet traffic are permitted through Windows Defender Firewall."""
     if os.name != "nt":
         return True
-    try:
-        rules_needed = []
+    def missing_rules() -> List[str]:
+        missing = []
         for rule_name in ["Gnirehtet DHCP", "Gnirehtet Subnet"]:
             chk = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
@@ -425,7 +434,16 @@ def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if rule_name not in chk.stdout:
-                rules_needed.append(rule_name)
+                missing.append(rule_name)
+        return missing
+
+    def rule_args(rule_name: str) -> List[str]:
+        if rule_name == "Gnirehtet DHCP":
+            return ["dir=in", "action=allow", "protocol=UDP", "localport=67", "profile=any"]
+        return ["dir=in", "action=allow", f"remoteip={subnet_cidr}", "profile=any"]
+
+    try:
+        rules_needed = missing_rules()
 
         if not rules_needed:
             return True
@@ -434,10 +452,7 @@ def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
         # Try direct commands first (succeeds if running as admin)
         all_ok = True
         for r in rules_needed:
-            if r == "Gnirehtet DHCP":
-                cmd = ["netsh", "advfirewall", "firewall", "add", "rule", "name=Gnirehtet DHCP", "dir=in", "action=allow", "protocol=UDP", "localport=67", "profile=any"]
-            else:
-                cmd = ["netsh", "advfirewall", "firewall", "add", "rule", "name=Gnirehtet Subnet", "dir=in", "action=allow", f"remoteip={subnet_cidr}", "profile=any"]
+            cmd = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={r}"] + rule_args(r)
             res = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
             if res.returncode != 0:
                 all_ok = False
@@ -446,20 +461,29 @@ def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
             log_success("Windows Firewall rules added successfully.")
             return True
 
-        # If elevation needed, trigger one-time UAC prompt to add missing rules
+        # If elevation needed, trigger one-time UAC prompt to add the rules that are still missing
+        rules_needed = missing_rules()
         log_info("Requesting administrator elevation to add Windows Firewall rules...")
-        uac_script = (
-            f'netsh advfirewall firewall add rule name=\\"Gnirehtet DHCP\\" dir=in action=allow protocol=UDP localport=67 profile=any; '
-            f'netsh advfirewall firewall add rule name=\\"Gnirehtet Subnet\\" dir=in action=allow remoteip={subnet_cidr} profile=any'
+        # cmd.exe chains commands with "&" (";" is not a separator). The whole cmd line is passed
+        # as a PowerShell single-quoted string, so the inner double quotes need no escaping.
+        cmd_line = " & ".join(
+            f'netsh advfirewall firewall add rule name="{r}" ' + " ".join(rule_args(r)) for r in rules_needed
         )
-        uac_cmd = f'Start-Process cmd -ArgumentList "/c {uac_script}" -Verb RunAs -Wait'
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command", uac_cmd],
-            capture_output=True,
-            timeout=8,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        time.sleep(0.5)
+        uac_cmd = "Start-Process cmd -ArgumentList '/c " + cmd_line.replace("'", "''") + "' -Verb RunAs -Wait"
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", uac_cmd],
+                capture_output=True,
+                timeout=60,  # leave time for the user to answer the UAC prompt
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            log_warn("Timed out waiting for the elevated firewall configuration.")
+
+        still_missing = missing_rules()
+        if still_missing:
+            log_warn(f"Windows Firewall rules still missing: {', '.join(still_missing)}")
+            return False
 
         log_success("Windows Firewall rules configured.")
         return True
