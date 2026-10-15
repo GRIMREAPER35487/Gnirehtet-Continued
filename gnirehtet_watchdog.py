@@ -20,7 +20,9 @@ limitations under the License.
 """
 
 import argparse
+import errno
 import glob
+import ipaddress
 import json
 import os
 import re
@@ -46,6 +48,10 @@ DEFAULT_NETMASK = "255.255.255.0"
 
 # Process priority flag for Windows (High priority class)
 HIGH_PRIORITY_CLASS = 0x00000080 if os.name == "nt" else 0
+
+# Native (CDC-NCM) setup retry backoff, in seconds
+NATIVE_RETRY_BASE_DELAY = 10.0
+NATIVE_RETRY_MAX_DELAY = 300.0
 
 
 class Colors:
@@ -119,13 +125,12 @@ def find_adb(explicit_path: Optional[str] = None) -> str:
     if explicit_path and os.path.isfile(explicit_path):
         return explicit_path
 
-    # Check local script directory or working directory first
+    # Check the script directory first (never the working directory, which may be untrusted)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     local_name = "adb.exe" if os.name == "nt" else "adb"
-    for base in [script_dir, os.getcwd()]:
-        candidate = os.path.join(base, local_name)
-        if os.path.isfile(candidate):
-            return candidate
+    candidate = os.path.join(script_dir, local_name)
+    if os.path.isfile(candidate):
+        return candidate
 
     env_adb = os.getenv("ADB")
     if env_adb and os.path.isfile(env_adb):
@@ -162,7 +167,6 @@ def find_jar(explicit_path: Optional[str] = None) -> str:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(script_dir, "gnirehtet.jar"),
-        os.path.join(os.getcwd(), "gnirehtet.jar"),
         os.path.join(script_dir, "relay-java", "build", "libs", "gnirehtet.jar"),
     ]
     for candidate in candidates:
@@ -420,6 +424,66 @@ def find_windows_ncm_adapter() -> Optional[dict]:
     return None
 
 
+_uac_declined = False
+
+
+def run_elevated_powershell(ps_command: str, timeout: float = 60.0) -> bool:
+    """Runs a PowerShell command that starts an elevated process (Start-Process -Verb RunAs).
+    Returns False without prompting again if the user already declined a UAC prompt in this session."""
+    global _uac_declined
+    if _uac_declined:
+        log_warn("Administrator elevation was declined earlier in this session; skipping.")
+        return False
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_command],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,  # leave time for the user to answer the UAC prompt
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except subprocess.TimeoutExpired:
+        log_warn("Timed out waiting for the elevated command.")
+        return False
+    if res.returncode != 0:
+        # Start-Process fails when the UAC prompt is declined ("The operation was canceled by the user")
+        _uac_declined = True
+        log_warn("Administrator elevation was declined or failed; it will not be requested again this session.")
+        return False
+    return True
+
+
+def prefix_to_netmask(prefix_len: int) -> str:
+    """Converts an IPv4 prefix length (e.g. 24) to a dotted netmask (e.g. 255.255.255.0)."""
+    return str(ipaddress.IPv4Network(f"0.0.0.0/{int(prefix_len)}").netmask)
+
+
+def get_adapter_ipv4_addresses(if_index: int) -> List[str]:
+    """Returns the non link-local IPv4 addresses currently assigned to an adapter."""
+    chk_cmd = f"Get-NetIPAddress -InterfaceIndex {int(if_index)} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
+    try:
+        chk_res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", chk_cmd],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=4,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in chk_res.stdout.splitlines() if line.strip() and not line.strip().startswith("169.254.")]
+
+
+def set_private_network_profile(if_index: int):
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {int(if_index)} -NetworkCategory Private -ErrorAction SilentlyContinue"],
+        capture_output=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+
+
 def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
     """Ensures inbound UDP port 67 and USB subnet traffic are permitted through Windows Defender Firewall."""
     if os.name != "nt":
@@ -470,15 +534,7 @@ def ensure_windows_firewall_rules(subnet_cidr: str = "192.168.42.0/24") -> bool:
             f'netsh advfirewall firewall add rule name="{r}" ' + " ".join(rule_args(r)) for r in rules_needed
         )
         uac_cmd = "Start-Process cmd -ArgumentList '/c " + cmd_line.replace("'", "''") + "' -Verb RunAs -Wait"
-        try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", uac_cmd],
-                capture_output=True,
-                timeout=60,  # leave time for the user to answer the UAC prompt
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except subprocess.TimeoutExpired:
-            log_warn("Timed out waiting for the elevated firewall configuration.")
+        run_elevated_powershell(uac_cmd)
 
         still_missing = missing_rules()
         if still_missing:
@@ -524,81 +580,55 @@ def configure_windows_ncm_adapter(adapter: dict, ip: str = DEFAULT_PC_IP, prefix
         return ip
 
     adapter_name = adapter.get("Name", "")
-    if_index = adapter.get("ifIndex")
+    try:
+        if_index = int(adapter.get("ifIndex"))
+    except (TypeError, ValueError):
+        log_warn(f"Invalid interface index for adapter '{adapter_name}': {adapter.get('ifIndex')!r}")
+        return None
 
     # 1. Ensure Windows Firewall permits UDP 67 and Subnet traffic
     ensure_windows_firewall_rules()
 
     # 2. Check if an IP is already configured (e.g. from Windows ICS or prior configuration)
-    try:
-        chk_cmd = f"Get-NetIPAddress -InterfaceIndex {if_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
-        chk_res = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", chk_cmd],
-            capture_output=True,
-            text=True,
-            timeout=4,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        existing_ips = [line.strip() for line in chk_res.stdout.splitlines() if line.strip() and not line.strip().startswith("169.254.")]
-        if existing_ips:
-            active_ip = existing_ips[0]
-            # Ensure Private network category
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"],
-                capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-            return active_ip
-    except Exception:
-        pass
+    existing_ips = get_adapter_ipv4_addresses(if_index)
+    if existing_ips:
+        set_private_network_profile(if_index)
+        return existing_ips[0]
 
-    # 3. Try configuring static IP via PowerShell
+    # 3. Try configuring static IP via PowerShell (only succeeds when running as administrator)
     log_info(f"Assigning static IP {ip}/{prefix_len} to Windows adapter '{adapter_name}'...")
     cfg_cmd = (
         f"Get-NetIPAddress -InterfaceIndex {if_index} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue; "
         f"Set-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 -Dhcp Disabled -ErrorAction SilentlyContinue; "
-        f"New-NetIPAddress -InterfaceIndex {if_index} -IPAddress {ip} -PrefixLength {prefix_len} -ErrorAction SilentlyContinue; "
+        f"New-NetIPAddress -InterfaceIndex {if_index} -IPAddress {ip} -PrefixLength {int(prefix_len)} -ErrorAction SilentlyContinue; "
         f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"
     )
-    res = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cfg_cmd],
-        capture_output=True,
-        text=True,
-        timeout=6,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-    )
-    if res.returncode == 0:
-        return ip
-
-    # 4. If unelevated, attempt netsh with UAC elevation
     try:
-        netsh_args = f'interface ipv4 set address name="{adapter_name}" static {ip} 255.255.255.0'
-        uac_cmd = f'Start-Process netsh -ArgumentList \'{netsh_args}\' -Verb RunAs -Wait'
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", uac_cmd],
-            capture_output=True,
-            timeout=8,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        time.sleep(1.0)
-        # Verify again
-        chk_res = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", chk_cmd],
+            ["powershell", "-NoProfile", "-Command", cfg_cmd],
             capture_output=True,
             text=True,
-            timeout=4,
+            errors="replace",
+            timeout=6,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
-        existing_ips = [line.strip() for line in chk_res.stdout.splitlines() if line.strip() and not line.strip().startswith("169.254.")]
+    except subprocess.TimeoutExpired:
+        log_warn("Timed out while assigning the static IP.")
+    # -ErrorAction SilentlyContinue hides failures (e.g. not elevated): verify the result
+    if ip in get_adapter_ipv4_addresses(if_index):
+        return ip
+
+    # 4. If unelevated, attempt netsh with UAC elevation.
+    # The interface is designated by its index (netsh accepts it as "name"), so the adapter name
+    # never needs to be quoted or escaped.
+    netsh_args = f"interface ipv4 set address name={if_index} static {ip} {prefix_to_netmask(prefix_len)}"
+    uac_cmd = f"Start-Process netsh -ArgumentList '{netsh_args}' -Verb RunAs -Wait"
+    if run_elevated_powershell(uac_cmd):
+        time.sleep(1.0)
+        existing_ips = get_adapter_ipv4_addresses(if_index)
         if existing_ips:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", f"Set-NetConnectionProfile -InterfaceIndex {if_index} -NetworkCategory Private -ErrorAction SilentlyContinue"],
-                capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
+            set_private_network_profile(if_index)
             return existing_ips[0]
-    except Exception as e:
-        log_warn(f"Failed to elevate adapter IP configuration: {e}")
 
     return None
 
@@ -641,6 +671,10 @@ class GnirehtetSupervisor:
         self.is_connected = False
         self.adb_fail_count = 0
         self.running = True
+        self.relay_down_reported = False
+        self.external_relay_reported = False
+        self.native_failures = 0
+        self.native_retry_at = 0.0
 
     def run_adb(self, args: List[str], timeout: float = ADB_TIMEOUT_SEC) -> Tuple[int, str]:
         """Runs an adb command with timeout protection against USB hangs."""
@@ -677,16 +711,29 @@ class GnirehtetSupervisor:
             log_error(f"Failed to restart ADB server: {e}")
 
     def is_relay_listening(self) -> bool:
-        """Checks if relay port is actively listening."""
+        """Checks if the relay port is in use, without connecting to it (a connection would be seen
+        by the relay as a client connecting and disconnecting)."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.5)
-            return s.connect_ex(("127.0.0.1", self.port)) == 0
+            try:
+                s.bind(("0.0.0.0", self.port))
+            except OSError as e:
+                return e.errno in (errno.EADDRINUSE, errno.EACCES) or getattr(e, "winerror", None) in (10048, 10013)
+            return False
+
+    def is_relay_alive(self) -> bool:
+        """True if the managed relay process runs, or if an external relay already listens on the port."""
+        if self.relay_process and self.relay_process.poll() is None:
+            return True
+        return self.is_relay_listening()
 
     def start_relay_server(self):
         """Starts the Java relay server with high priority and configured JVM flags."""
         if self.is_relay_listening():
-            log_info(f"Relay server is already listening on port {self.port}.")
+            if not self.external_relay_reported:
+                log_info(f"Relay server is already listening on port {self.port}.")
+                self.external_relay_reported = True
             return
+        self.external_relay_reported = False
 
         jvm_flags_str = " ".join(self.jvm_args) if self.jvm_args else "default"
         log_info(f"Starting Java relay server on port {self.port} [{jvm_flags_str}]...")
@@ -698,15 +745,21 @@ class GnirehtetSupervisor:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",  # never fail on undecodable relay output
             bufsize=1,
             creationflags=HIGH_PRIORITY_CLASS
         )
 
         def _drain_relay_stdout(proc):
-            try:
-                for line in iter(proc.stdout.readline, ""):
-                    if not line:
-                        break
+            # Keep draining until EOF: if the pipe filled up, the relay would block on its next log line
+            while True:
+                try:
+                    line = proc.stdout.readline()
+                except (OSError, ValueError):
+                    break  # pipe closed
+                if not line:
+                    break  # EOF
+                try:
                     clean_line = line.strip()
                     if not clean_line:
                         continue
@@ -715,8 +768,8 @@ class GnirehtetSupervisor:
                         print(f"[{time.strftime('%H:%M:%S')}] {Colors.CYAN}[RELAY]{Colors.RESET} {clean_line}")
                     elif any(k in clean_line for k in ["Open", "Close", "connected", "disconnected", "dropped", "ERROR", "Exception", "WARN"]):
                         print(f"[{time.strftime('%H:%M:%S')}] {Colors.CYAN}[RELAY]{Colors.RESET} {clean_line}")
-            except Exception:
-                pass
+                except Exception:
+                    pass  # a single bad line must not stop the drainer
 
         threading.Thread(target=_drain_relay_stdout, args=(self.relay_process,), daemon=True, name="RelayDrainer").start()
 
@@ -905,16 +958,23 @@ class GnirehtetSupervisor:
 
         # 2. Determine transport mode: Standard ADB reverse (default) vs Native USB (experimental)
         relay_host: Optional[str] = None
+        self.active_native_mode = False
         if self.native:
-            log_info("Experimental Native USB (CDC-NCM) mode requested (--native)...")
-            relay_host = self.ensure_ncm_link(serial)
-            if relay_host:
-                self.active_native_mode = True
+            now = time.monotonic()
+            if now < self.native_retry_at:
+                log_info(f"Native USB setup failed recently; retrying in {int(self.native_retry_at - now)}s. Using ADB reverse tunnel meanwhile.")
             else:
-                log_warn("Native USB unavailable. Falling back to default ADB reverse tunnel...")
-                self.active_native_mode = False
-        else:
-            self.active_native_mode = False
+                log_info("Experimental Native USB (CDC-NCM) mode requested (--native)...")
+                relay_host = self.ensure_ncm_link(serial)
+                if relay_host:
+                    self.active_native_mode = True
+                    self.native_failures = 0
+                    self.native_retry_at = 0.0
+                else:
+                    self.native_failures += 1
+                    delay = min(NATIVE_RETRY_BASE_DELAY * (2 ** (self.native_failures - 1)), NATIVE_RETRY_MAX_DELAY)
+                    self.native_retry_at = time.monotonic() + delay
+                    log_warn(f"Native USB unavailable (next attempt in {int(delay)}s). Falling back to default ADB reverse tunnel...")
 
         if not self.active_native_mode:
             # Legacy mode: verify APK is installed
@@ -1019,8 +1079,13 @@ class GnirehtetSupervisor:
             try:
                 # 1. Ensure relay server process is alive (in default mode)
                 if not self.active_native_mode:
-                    if not self.relay_process or self.relay_process.poll() is not None:
-                        log_warn("Relay server process is not running. Restarting...")
+                    if self.is_relay_alive():
+                        self.relay_down_reported = False
+                    else:
+                        # log only on state change, not on every poll
+                        if not self.relay_down_reported:
+                            log_warn("Relay server process is not running. Restarting...")
+                            self.relay_down_reported = True
                         self.start_relay_server()
 
                 # 2. Check connected devices
