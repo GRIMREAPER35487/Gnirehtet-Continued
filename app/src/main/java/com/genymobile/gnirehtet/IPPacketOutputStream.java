@@ -31,6 +31,7 @@ public class IPPacketOutputStream extends OutputStream {
     private static final String TAG = IPPacketOutputStream.class.getSimpleName();
 
     private static final int MAX_IP_PACKET_LENGTH = 1 << 16; // packet length is stored on 16 bits
+    private static final int MIN_IP_PACKET_LENGTH = 20; // minimal IPv4 header length
 
     private final OutputStream target;
     // must always accept 1 full packet + any partial packet
@@ -110,18 +111,33 @@ public class IPPacketOutputStream extends OutputStream {
         if (version != 4) {
             Log.e(TAG, "Unsupported packet received, IP version is:" + version);
             Log.d(TAG, "Clearing buffer");
-            buffer.clear();
+            dropBufferedData();
             return false;
         }
         int packetLength = readPacketLength(buffer);
-        if (packetLength == -1 || packetLength > buffer.remaining()) {
+        if (packetLength == -1) {
             // no packet
+            return false;
+        }
+        if (packetLength < MIN_IP_PACKET_LENGTH) {
+            Log.e(TAG, "Invalid packet length: " + packetLength);
+            Log.d(TAG, "Clearing buffer");
+            dropBufferedData();
+            return false;
+        }
+        if (packetLength > buffer.remaining()) {
+            // packet not complete yet
             return false;
         }
 
         target.write(buffer.array(), buffer.arrayOffset() + buffer.position(), packetLength);
         buffer.position(buffer.position() + packetLength);
         return true;
+    }
+
+    private void dropBufferedData() {
+        // consume everything between position and limit, so that compact() empties the buffer
+        buffer.position(buffer.limit());
     }
 
     /**

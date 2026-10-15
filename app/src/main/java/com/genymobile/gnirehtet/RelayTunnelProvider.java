@@ -76,9 +76,24 @@ public class RelayTunnelProvider {
             // the first connection must either notify "connected" or "disconnected"
             boolean notifyDisconnectedOnError = first;
             first = false;
-            connectTunnel(notifyDisconnectedOnError);
+            try {
+                connectTunnel(notifyDisconnectedOnError);
+            } catch (IOException e) {
+                // do not keep an unconnected tunnel: its streams are not initialized
+                synchronized (this) {
+                    if (tunnel != null) {
+                        try {
+                            tunnel.close();
+                        } catch (RuntimeException closeException) {
+                            // the tunnel is discarded anyway
+                        }
+                        tunnel = null;
+                    }
+                }
+                throw e;
+            }
+            return tunnel;
         }
-        return tunnel;
     }
 
     private void connectTunnel(boolean notifyDisconnectedOnError) throws IOException {

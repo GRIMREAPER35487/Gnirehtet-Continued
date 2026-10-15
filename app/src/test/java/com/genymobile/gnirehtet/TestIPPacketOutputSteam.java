@@ -101,4 +101,39 @@ public class TestIPPacketOutputSteam {
         Assert.assertEquals("Exactly 3 packets should have been written", 96, cos.size());
         Assert.assertEquals("Packets should be written individually to the target", 3, cos.packetCount);
     }
+
+    @Test
+    public void testZeroLengthPacketIsDropped() throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        IPPacketOutputStream pos = new IPPacketOutputStream(bos);
+
+        byte[] invalid = createMockPacket().array();
+        invalid[2] = 0; // total length = 0
+        invalid[3] = 0;
+        pos.write(invalid, 0, invalid.length); // must not loop forever
+        Assert.assertEquals("Invalid packet must not be written", 0, bos.size());
+
+        byte[] rawPacket = createMockPacket().array();
+        pos.write(rawPacket, 0, rawPacket.length);
+        Assert.assertTrue("Valid packet must be written after an invalid one",
+                Arrays.equals(rawPacket, bos.toByteArray()));
+    }
+
+    @Test
+    public void testUnsupportedVersionIsDropped() throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        IPPacketOutputStream pos = new IPPacketOutputStream(bos);
+
+        byte[] ipv6 = createMockPacket().array();
+        ipv6[0] = (byte) (6 << 4);
+        // repeatedly writing unsupported data must not fill the buffer
+        for (int i = 0; i < 10000; ++i) {
+            pos.write(ipv6, 0, ipv6.length);
+        }
+        Assert.assertEquals(0, bos.size());
+
+        byte[] rawPacket = createMockPacket().array();
+        pos.write(rawPacket, 0, rawPacket.length);
+        Assert.assertTrue(Arrays.equals(rawPacket, bos.toByteArray()));
+    }
 }

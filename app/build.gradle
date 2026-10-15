@@ -20,6 +20,10 @@ android {
             signingConfig signingConfigs.debug
         }
     }
+    testOptions {
+        // android.util.Log calls must not fail in local unit tests
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {

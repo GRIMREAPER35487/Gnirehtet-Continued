@@ -65,11 +65,9 @@ public class GnirehtetService extends VpnService {
     }
 
     public static void stop(Context context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(createStopIntent(context));
-        } else {
-            context.startService(createStopIntent(context));
-        }
+        // do not use startForegroundService(): close() does not call startForeground() when the VPN
+        // is not running, which would violate the foreground service contract on Android 8+
+        context.startService(createStopIntent(context));
     }
 
     static Intent createStopIntent(Context context) {
@@ -106,6 +104,9 @@ public class GnirehtetService extends VpnService {
         notifier.start();
         if (setupVpn(config)) {
             startForwarding(config);
+        } else {
+            notifier.stop();
+            stopSelf();
         }
     }
 
