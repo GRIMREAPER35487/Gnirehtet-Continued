@@ -182,7 +182,6 @@ public class Client {
 
     private void close(String reason) {
         Log.i(TAG, "Client #" + id + " connection dropped. Reason: " + reason);
-        OscSender.sendVrcChatboxMessage("Disconnected Brb!");
         selectionKey.cancel();
         try {
             clientChannel.close();
