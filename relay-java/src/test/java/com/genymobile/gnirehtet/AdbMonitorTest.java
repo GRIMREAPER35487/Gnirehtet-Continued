@@ -122,4 +122,19 @@ public class AdbMonitorTest {
         Assert.assertEquals("Position must be restored to the start of the incomplete packet",
                 secondPacketPosition, buffer.position());
     }
+
+    @Test
+    public void testResetConnectedDevices() {
+        final int[] count = new int[1];
+        AdbMonitor monitor = new AdbMonitor((serial) -> ++count[0]);
+        String packet = "0123456789ABCDEF\tdevice\n";
+        monitor.handlePacket(packet);
+        monitor.handlePacket(packet);
+        Assert.assertEquals("An already connected device must not be reported twice", 1, count[0]);
+
+        // after an adb server restart, devices already present must be reported again
+        monitor.resetConnectedDevices();
+        monitor.handlePacket(packet);
+        Assert.assertEquals(2, count[0]);
+    }
 }

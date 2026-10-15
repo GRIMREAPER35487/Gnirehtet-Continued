@@ -43,7 +43,7 @@ public final class Main {
         // not instantiable
     }
 
-    private static String getAdbPath() {
+    static String getAdbPath() {
         String adb = System.getenv("ADB");
         return adb != null ? adb : "adb";
     }

@@ -84,6 +84,9 @@ public class AdbMonitor {
 
     private boolean trackDevicesOnChannel(ByteChannel channel) throws IOException {
         socketBuffer.clear();
+        // A new track-devices session (after a reconnection or an adb server restart) first reports all the devices
+        // currently connected. Their "adb reverse" tunnels may have been lost, so consider all of them as new.
+        resetConnectedDevices();
         writeRequest(channel, TRACK_DEVICES_REQUEST);
         // the daemon initially sends "OKAY" if it understands the request
         if (!consumeOkay(channel)) {
@@ -160,6 +163,10 @@ public class AdbMonitor {
         return new String(BUFFER, 0, length, StandardCharsets.UTF_8);
     }
 
+    void resetConnectedDevices() {
+        connectedDevices = new ArrayList<>();
+    }
+
     void handlePacket(String packet) {
         List<String> currentConnectedDevices = parseConnectedDevices(packet);
         for (String serial : currentConnectedDevices) {
@@ -209,7 +216,7 @@ public class AdbMonitor {
     private static boolean startAdbDaemon() {
         Log.i(TAG, "Restarting adb deamon");
         try {
-            Process process = new ProcessBuilder("adb", "start-server")
+            Process process = new ProcessBuilder(Main.getAdbPath(), "start-server")
                     .redirectOutput(ProcessBuilder.Redirect.INHERIT)
                     .redirectError(ProcessBuilder.Redirect.INHERIT).start();
             int exitCode = process.waitFor();
