@@ -1,24 +1,37 @@
 apply plugin: 'com.android.application'
 
+base {
+    archivesName = "gnirehtet" // change apk name
+}
+
 android {
-    compileSdkVersion rootProject.ext.compileSdkVersion
-    buildToolsVersion rootProject.ext.buildToolsVersion
+    namespace = "com.genymobile.gnirehtet"
+    compileSdk = rootProject.ext.compileSdkVersion
 
     defaultConfig {
-        archivesBaseName = "gnirehtet" // change apk name
-        applicationId "com.genymobile.gnirehtet"
-        minSdkVersion 21
-        targetSdkVersion 29
-        versionCode 18
-        versionName "2.7.0-beta.4"
-        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+        applicationId = "com.genymobile.gnirehtet"
+        minSdk = 21
+        targetSdk = 29 // must stay at 29 (no foregroundServiceType / POST_NOTIFICATIONS handling)
+        versionCode = 18
+        versionName = "2.7.0-beta.4"
     }
     buildTypes {
         release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
+            minifyEnabled = false
+            proguardFiles(getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro')
+            signingConfig = signingConfigs.debug
         }
+    }
+    buildFeatures {
+        buildConfig = true // BuildConfig.DEBUG is used
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+    lint {
+        // compileSdk is newer than targetSdk on purpose
+        disable += ['OldTargetApi', 'ExpiredTargetSdkVersion']
     }
     testOptions {
         // android.util.Log calls must not fail in local unit tests
@@ -28,9 +41,6 @@ android {
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    androidTestImplementation('com.android.support.test.espresso:espresso-core:2.2.2', {
-        exclude group: 'com.android.support', module: 'support-annotations'
-    })
     testImplementation 'junit:junit:4.12'
 }
 
