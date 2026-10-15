@@ -25,7 +25,7 @@ import java.nio.channels.ReadableByteChannel;
  */
 public class Packetizer {
 
-    private final ByteBuffer buffer = ByteBuffer.allocate(IPv4Packet.MAX_PACKET_LENGTH);
+    private final ByteBuffer buffer;
     private final ByteBuffer payloadBuffer;
 
     private final IPv4Header responseIPv4Header;
@@ -33,6 +33,20 @@ public class Packetizer {
     private final IPv4Packet packet;
 
     public Packetizer(IPv4Header ipv4Header, TransportHeader transportHeader) {
+        this(ipv4Header, transportHeader, IPv4Packet.MAX_PACKET_LENGTH);
+    }
+
+    /**
+     * Create a packetizer using a buffer of the given capacity (headers included).
+     * <p>
+     * A small capacity is sufficient for a packetizer used only for empty packets.
+     *
+     * @param ipv4Header the IPv4 header template
+     * @param transportHeader the transport header template
+     * @param capacity the buffer capacity
+     */
+    public Packetizer(IPv4Header ipv4Header, TransportHeader transportHeader, int capacity) {
+        buffer = ByteBuffer.allocate(capacity);
         responseIPv4Header = ipv4Header.copyTo(buffer);
         responseTransportHeader = transportHeader.copyTo(buffer);
         payloadBuffer = buffer.slice();

@@ -216,26 +216,50 @@ public class Client {
     }
 
     public void consume(PacketSource source) {
-        IPv4Packet packet = source.get();
-        if (sendToClient(packet)) {
-            source.next();
+        if (pendingPacketSources.contains(source)) {
+            // already waiting for space, its packets will be pulled in order by processPending()
             return;
         }
-        assert !pendingPacketSources.contains(source);
-        pendingPacketSources.add(source);
+        if (!drain(source)) {
+            pendingPacketSources.add(source);
+        }
+    }
+
+    /**
+     * Send all the packets available from {@code source}.
+     *
+     * @param source the packet source
+     * @return {@code true} if all packets have been sent, {@code false} if the client buffer is full
+     */
+    private boolean drain(PacketSource source) {
+        IPv4Packet packet;
+        while ((packet = source.get()) != null) {
+            if (!sendToClient(packet)) {
+                return false;
+            }
+            source.next();
+        }
+        return true;
+    }
+
+    /**
+     * Forget a packet source (typically a closed connection), so that it is not pulled anymore.
+     *
+     * @param source the packet source
+     */
+    public void removePendingPacketSource(Object source) {
+        pendingPacketSources.remove(source);
     }
 
     private void processPending() {
         Iterator<PacketSource> iterator = pendingPacketSources.iterator();
         while (iterator.hasNext()) {
             PacketSource packetSource = iterator.next();
-            IPv4Packet packet = packetSource.get();
-            if (sendToClient(packet)) {
-                packetSource.next();
-                Log.d(TAG, "Pending packet sent to client (" + packet.getRawLength() + ")");
+            if (drain(packetSource)) {
+                Log.d(TAG, "Pending packets sent to client");
                 iterator.remove();
             } else {
-                Log.w(TAG, "Pending packet not sent to client (" + packet.getRawLength() + "), client buffer full again");
+                Log.w(TAG, "Pending packets not all sent to client, client buffer full again");
                 return;
             }
         }

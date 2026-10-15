@@ -21,6 +21,8 @@ import java.net.StandardSocketOptions;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Random;
 
 public class TCPConnection extends AbstractConnection implements PacketSource {
@@ -33,6 +35,14 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     private static final int MAX_PAYLOAD_SIZE = MTU - 20 - 20;
 
     private static final Random RANDOM = new Random();
+
+    // empty packets (ACK, FIN, RST, SYN-ACK) only contain headers (IPv4 header may contain options)
+    private static final int CONTROL_PACKET_BUFFER_SIZE = 128;
+    // maximum number of control packets kept while the client buffer is full
+    private static final int MAX_PENDING_CONTROL_PACKETS = 64;
+
+    // half-open connections (waiting for an ACK from the client) expire if nothing happens
+    static final long HALF_OPEN_IDLE_TIMEOUT = 60 * 1000;
 
     /**
      * See <a href="https://tools.ietf.org/html/rfc793#page-23">RFC793</a>.
@@ -59,6 +69,11 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     private final StreamBuffer clientToNetwork = new StreamBuffer(4 * IPv4Packet.MAX_PACKET_LENGTH);
     private final Packetizer networkToClient;
     private IPv4Packet packetForClient;
+    // separate buffer, so that building an empty packet never overwrites a pending packetForClient
+    private final Packetizer controlToClient;
+    // empty packets that could not be sent immediately, to be sent after packetForClient
+    private final Deque<IPv4Packet> pendingControlPackets = new ArrayDeque<>();
+    private long lastActivity = System.currentTimeMillis();
 
     private final SocketChannel channel;
     private final SelectionKey selectionKey;
@@ -83,7 +98,12 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         networkToClient.getResponseIPv4Header().swapSourceAndDestination();
         networkToClient.getResponseTransportHeader().swapSourceAndDestination();
 
+        controlToClient = new Packetizer(ipv4Header, shrinkedTcpHeader, CONTROL_PACKET_BUFFER_SIZE);
+        controlToClient.getResponseIPv4Header().swapSourceAndDestination();
+        controlToClient.getResponseTransportHeader().swapSourceAndDestination();
+
         SelectionHandler selectionHandler = (selectionKey) -> {
+            touch();
             if (selectionKey.isValid() && selectionKey.isConnectable()) {
                 processConnect();
             }
@@ -158,7 +178,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     private void eof() {
         sendEmptyPacketToClient(TCPHeader.FLAG_FIN | TCPHeader.FLAG_ACK);
 
-        finSequenceNumber = sequenceNumber;
+        finSequenceNumber = getNextSequenceNumber();
         ++sequenceNumber; // FIN counts for 1 byte
         if (state == State.CLOSE_WAIT) {
             state = State.LAST_ACK;
@@ -180,8 +200,27 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     @Override
     public boolean isExpired() {
-        // no external timeout expiration
-        return false;
+        if (state == null || !isHalfOpen(state)) {
+            // established connections are closed by either side, not by a timeout
+            return false;
+        }
+        return System.currentTimeMillis() >= lastActivity + HALF_OPEN_IDLE_TIMEOUT;
+    }
+
+    static boolean isHalfOpen(State state) {
+        switch (state) {
+            case SYN_RECEIVED:
+            case FIN_WAIT_1:
+            case CLOSING:
+            case LAST_ACK:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void touch() {
+        lastActivity = System.currentTimeMillis();
     }
 
     private void updateHeaders(int flags) {
@@ -189,6 +228,13 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         tcpHeader.setFlags(flags);
         tcpHeader.setSequenceNumber(sequenceNumber);
         tcpHeader.setAcknowledgementNumber(acknowledgementNumber);
+    }
+
+    /**
+     * Return the sequence number of the next byte to send, taking into account the data packet waiting for client space.
+     */
+    private int getNextSequenceNumber() {
+        return packetForClient == null ? sequenceNumber : sequenceNumber + packetForClient.getPayloadLength();
     }
 
     private SocketChannel createChannel() throws IOException {
@@ -208,6 +254,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     @Override
     public void sendToNetwork(IPv4Packet packet) {
+        touch();
         handlePacket(packet);
         logd(TAG, "current ack=" + acknowledgementNumber);
         updateInterests();
@@ -294,6 +341,10 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         } else if (theirSequenceNumber != synSequenceNumber) {
             // duplicate SYN with different sequence number
             resetConnection();
+        } else if (state == State.SYN_RECEIVED) {
+            // the client did not receive our SYN-ACK (or it was delayed), send it again
+            logd(TAG, "Duplicate SYN, re-sending SYN-ACK");
+            sendEmptyPacketToClient(TCPHeader.FLAG_SYN | TCPHeader.FLAG_ACK, sequenceNumber - 1);
         }
     }
 
@@ -313,7 +364,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         switch (state) {
             case ESTABLISHED:
                 sendEmptyPacketToClient(TCPHeader.FLAG_FIN | TCPHeader.FLAG_ACK);
-                finSequenceNumber = sequenceNumber;
+                finSequenceNumber = getNextSequenceNumber();
                 ++sequenceNumber; // FIN counts for 1 byte
                 // do not wait for the real network connection, switch immediately to LAST_ACK (bypass CLOSE_WAIT)
                 state = State.LAST_ACK;
@@ -405,9 +456,12 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         close();
     }
 
-    private IPv4Packet createEmptyResponsePacket(int flags) {
-        updateHeaders(flags);
-        IPv4Packet packet = networkToClient.packetizeEmptyPayload();
+    private IPv4Packet createEmptyResponsePacket(int flags, int seq) {
+        TCPHeader tcpHeader = (TCPHeader) controlToClient.getResponseTransportHeader();
+        tcpHeader.setFlags(flags);
+        tcpHeader.setSequenceNumber(seq);
+        tcpHeader.setAcknowledgementNumber(acknowledgementNumber);
+        IPv4Packet packet = controlToClient.packetizeEmptyPayload();
         logd(TAG, "Forging empty response (flags=" + flags + ") " + numbers());
         if (Log.isVerboseEnabled()) {
             logd(TAG, Binary.buildPacketString(packet.getRaw()));
@@ -419,7 +473,22 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     }
 
     private void sendEmptyPacketToClient(int flags) {
-        sendToClient(createEmptyResponsePacket(flags));
+        sendEmptyPacketToClient(flags, getNextSequenceNumber());
+    }
+
+    private void sendEmptyPacketToClient(int flags, int seq) {
+        IPv4Packet packet = createEmptyResponsePacket(flags, seq);
+        if (packetForClient == null && pendingControlPackets.isEmpty() && sendToClient(packet)) {
+            return;
+        }
+        // keep the order with the pending packets, and never lose a control packet if the client buffer is full
+        if (pendingControlPackets.size() >= MAX_PENDING_CONTROL_PACKETS) {
+            logw(TAG, "Too many pending control packets, dropping the oldest");
+            pendingControlPackets.pollFirst();
+        }
+        // the controlToClient buffer is reused, store a copy
+        pendingControlPackets.addLast(new IPv4Packet(Binary.copy(packet.getRaw())));
+        consume(this);
     }
 
     protected void updateInterests() {
@@ -447,7 +516,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         if (!state.isConnected() || state.isClosed()) {
             return false;
         }
-        if (packetForClient != null) {
+        if (packetForClient != null || !pendingControlPackets.isEmpty()) {
             // a packet is already pending
             return false;
         }
@@ -468,9 +537,13 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     @Override
     public IPv4Packet get() {
-        // TODO update only when necessary
-        updateAcknowledgementNumber(packetForClient);
-        return packetForClient;
+        if (packetForClient != null) {
+            // TODO update only when necessary
+            updateAcknowledgementNumber(packetForClient);
+            return packetForClient;
+        }
+        // control packets queued while the client buffer was full (or after packetForClient)
+        return pendingControlPackets.peekFirst();
     }
 
     private void updateAcknowledgementNumber(IPv4Packet packet) {
@@ -481,6 +554,13 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     @Override
     public void next() {
+        if (packetForClient == null) {
+            IPv4Packet control = pendingControlPackets.pollFirst();
+            assert control != null : "next() called without any pending packet";
+            logd(TAG, "Pending control packet sent to client");
+            updateInterests();
+            return;
+        }
         logd(TAG, "Packet (" + packetForClient.getPayloadLength() + " bytes) sent to client " + numbers());
         if (Log.isVerboseEnabled()) {
             logv(TAG, Binary.buildPacketString(packetForClient.getRaw()));

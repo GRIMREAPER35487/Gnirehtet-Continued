@@ -29,6 +29,11 @@ package com.genymobile.gnirehtet.relay;
  */
 public interface PacketSource {
 
+    /**
+     * Return the next packet to send to the client, without consuming it.
+     *
+     * @return the next packet, or {@code null} if there is nothing to send
+     */
     IPv4Packet get();
 
     void next();

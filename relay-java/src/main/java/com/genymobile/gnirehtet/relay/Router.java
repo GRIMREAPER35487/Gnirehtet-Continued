@@ -85,6 +85,7 @@ public class Router {
     }
 
     public void remove(Connection connection) {
+        client.removePendingPacketSource(connection);
         if (connections.remove(connection.getId()) == null) {
             throw new AssertionError("Removed a connection unknown from the router");
         }
@@ -99,6 +100,7 @@ public class Router {
                     Log.d(TAG, "Remove expired connection: " + connection.getId());
                 }
                 connection.disconnect();
+                client.removePendingPacketSource(connection);
                 iterator.remove();
             }
         }

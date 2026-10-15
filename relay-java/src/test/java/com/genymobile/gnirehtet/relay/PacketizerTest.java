@@ -103,4 +103,27 @@ public class PacketizerTest {
         Assert.assertEquals(0x77, packetPayload.get());
         Assert.assertEquals((byte) 0x88, packetPayload.get());
     }
+
+    @Test
+    public void testSmallCapacityPacketizerForEmptyPackets() throws IOException {
+        IPv4Packet referencePacket = new IPv4Packet(createMockPacket());
+        IPv4Header ipv4Header = referencePacket.getIpv4Header();
+        TransportHeader transportHeader = referencePacket.getTransportHeader();
+
+        Packetizer dataPacketizer = new Packetizer(ipv4Header, transportHeader);
+        Packetizer controlPacketizer = new Packetizer(ipv4Header, transportHeader, 128);
+
+        byte[] data = {0x11, 0x22, 0x33, 0x44};
+        ReadableByteChannel channel = Channels.newChannel(new ByteArrayInputStream(data));
+        IPv4Packet dataPacket = dataPacketizer.packetize(channel);
+        Assert.assertEquals(32, dataPacket.getRawLength());
+
+        IPv4Packet emptyPacket = controlPacketizer.packetizeEmptyPayload();
+        Assert.assertEquals(28, emptyPacket.getRawLength());
+
+        // building an empty packet must not corrupt the pending data packet
+        Assert.assertEquals(32, dataPacket.getRawLength());
+        Assert.assertEquals(4, dataPacket.getPayloadLength());
+        Assert.assertEquals(0x11223344, dataPacket.getPayload().getInt());
+    }
 }
