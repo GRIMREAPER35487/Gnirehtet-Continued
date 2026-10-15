@@ -84,4 +84,37 @@ public class CommandLineArgumentsTest {
     public void testNoRoutesParameter() {
         CommandLineArguments.parse(ACCEPT_ALL, "-r");
     }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testOptionValueMustNotBeAnOption() {
+        CommandLineArguments.parse(ACCEPT_ALL, "-d", "-r", "1.2.3.0/24");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testNegativePortIsMissingValue() {
+        CommandLineArguments.parse(ACCEPT_ALL, "-p", "-1");
+    }
+
+    @Test
+    public void testValidDnsServersAndRoutes() {
+        CommandLineArguments.validateDnsServers("8.8.8.8,1.1.1.1");
+        CommandLineArguments.validateDnsServers(null);
+        CommandLineArguments.validateRoutes("1.2.3.0/24,10.0.0.0/8,192.168.1.1");
+        CommandLineArguments.validateRoutes(null);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testDnsServersShellInjection() {
+        CommandLineArguments.validateDnsServers("8.8.8.8;reboot");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testRoutesShellInjection() {
+        CommandLineArguments.validateRoutes("1.2.3.0/24 $(reboot)");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testRoutesInvalidPrefix() {
+        CommandLineArguments.validateRoutes("1.2.3.0/33");
+    }
 }

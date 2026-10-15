@@ -6,7 +6,9 @@
 
 param(
     [string]$InternetName = "Wi-Fi",
-    [string]$HeadsetName = "Ethernet 4"
+    [string]$HeadsetName = "Ethernet 4",
+    # Disable sharing on other connections without asking for confirmation
+    [switch]$Force
 )
 
 # Check Administrator privileges (no recursive loop!)
@@ -96,25 +98,71 @@ $privName = $netShare.NetConnectionProps.Invoke($privConn).Name
 Write-Host "Sharing Internet from: '$pubName'" -ForegroundColor Green
 Write-Host "Target Headset adapter: '$privName'" -ForegroundColor Green
 
-# 4. Disable existing sharing to avoid COM state conflicts
+# 4. Windows allows only one shared (public) / home (private) pair: sharing must be disabled on any
+#    other connection. Never touch other connections silently.
+$pubCfg = $netShare.INetSharingConfigurationForINetConnection.Invoke($pubConn)
+$privCfg = $netShare.INetSharingConfigurationForINetConnection.Invoke($privConn)
+
+$otherShared = @()
 foreach ($conn in $netShare.EnumEveryConnection) {
     try {
+        $name = $netShare.NetConnectionProps.Invoke($conn).Name
+        if ($name -eq $pubName -or $name -eq $privName) {
+            continue
+        }
         $cfg = $netShare.INetSharingConfigurationForINetConnection.Invoke($conn)
         if ($cfg.SharingEnabled) {
-            $cfg.DisableSharing()
+            $otherShared += [pscustomobject]@{ Name = $name; Config = $cfg }
         }
     } catch {}
+}
+
+if ($otherShared.Count -gt 0) {
+    Write-Host ""
+    Write-Host "[WARN] Internet Connection Sharing is currently enabled on other connection(s):" -ForegroundColor Yellow
+    foreach ($other in $otherShared) {
+        Write-Host "         - '$($other.Name)'" -ForegroundColor Yellow
+    }
+    Write-Host "       Windows supports only one shared connection pair, so sharing will be DISABLED on them." -ForegroundColor Yellow
+    if (-not $Force) {
+        $answer = Read-Host "Continue? [y/N]"
+        if ($answer -notmatch '^(y|yes)$') {
+            Write-Host "Aborted, nothing was changed." -ForegroundColor Yellow
+            exit 1
+        }
+    }
+    foreach ($other in $otherShared) {
+        try {
+            $other.Config.DisableSharing()
+            Write-Host "Disabled sharing on '$($other.Name)'." -ForegroundColor Yellow
+        } catch {
+            Write-Host "[ERROR] Could not disable sharing on '$($other.Name)': $($_.Exception.Message)" -ForegroundColor Red
+            Read-Host "Press Enter to exit"
+            exit 1
+        }
+    }
+}
+
+# Our own two connections: reset them only if they are not already shared the right way
+# (SharingConnectionType: 0 = Public / Internet, 1 = Private / Local Headset)
+$pubOk = $pubCfg.SharingEnabled -and $pubCfg.SharingConnectionType -eq 0
+$privOk = $privCfg.SharingEnabled -and $privCfg.SharingConnectionType -eq 1
+foreach ($cfg in @(@{ Cfg = $pubCfg; Ok = $pubOk }, @{ Cfg = $privCfg; Ok = $privOk })) {
+    if ($cfg.Cfg.SharingEnabled -and -not $cfg.Ok) {
+        try { $cfg.Cfg.DisableSharing() } catch {}
+    }
 }
 
 Start-Sleep -Milliseconds 800
 
 # 5. Enable sharing (0 = Public / Internet, 1 = Private / Local Headset)
 try {
-    $pubCfg = $netShare.INetSharingConfigurationForINetConnection.Invoke($pubConn)
-    $privCfg = $netShare.INetSharingConfigurationForINetConnection.Invoke($privConn)
-
-    $pubCfg.EnableSharing(0)
-    $privCfg.EnableSharing(1)
+    if (-not $pubOk) {
+        $pubCfg.EnableSharing(0)
+    }
+    if (-not $privOk) {
+        $privCfg.EnableSharing(1)
+    }
 } catch {
     Write-Host "[ERROR] Failed to enable Internet Connection Sharing: $($_.Exception.Message)" -ForegroundColor Red
     Read-Host "Press Enter to exit"

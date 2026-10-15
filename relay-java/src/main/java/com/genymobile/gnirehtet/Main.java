@@ -286,6 +286,9 @@ public final class Main {
     @SuppressWarnings("checkstyle:MagicNumber")
     private static void cmdStart(String serial, String dnsServers, String routes, int port) throws InterruptedException, IOException,
             CommandExecutionException {
+        // these values are interpreted by the device shell ("adb shell am start ..."), never pass arbitrary strings
+        CommandLineArguments.validateDnsServers(dnsServers);
+        CommandLineArguments.validateRoutes(routes);
 
         if (mustInstallClient(serial)) {
             cmdInstall(serial);
@@ -395,26 +398,25 @@ public final class Main {
         Log.i(TAG, "Checking gnirehtet client...");
         List<String> command = createAdbCommand(serial, "shell", "dumpsys", "package", "com.genymobile.gnirehtet");
         Log.d(TAG, "Execute: " + command);
-        Process process = new ProcessBuilder(command).start();
-        try {
-            Scanner scanner = new Scanner(process.getInputStream());
+        // merge stderr into stdout, so that a single reader drains everything (a full pipe would block the process)
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        String installedVersionCode = null;
+        try (Scanner scanner = new Scanner(process.getInputStream())) {
             // read the versionCode of the installed package
             Pattern pattern = Pattern.compile("^    versionCode=(\\p{Digit}+).*");
+            // read until EOF, even after a match
             while (scanner.hasNextLine()) {
                 Matcher matcher = pattern.matcher(scanner.nextLine());
-                if (matcher.matches()) {
-                    String installedVersionCode = matcher.group(1);
-                    return !REQUIRED_APK_VERSION_CODE.equals(installedVersionCode);
+                if (installedVersionCode == null && matcher.matches()) {
+                    installedVersionCode = matcher.group(1);
                 }
             }
-        } finally {
-            int exitCode = process.waitFor();
-            if (exitCode != 0) {
-                // Overwrite any pending exception, the command just failed
-                throw new CommandExecutionException(command, exitCode);
-            }
         }
-        return true;
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new CommandExecutionException(command, exitCode);
+        }
+        return installedVersionCode == null || !REQUIRED_APK_VERSION_CODE.equals(installedVersionCode);
     }
 
 

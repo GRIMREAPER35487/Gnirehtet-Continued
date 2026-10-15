@@ -50,11 +50,14 @@ public class CIDR implements Parcelable {
         int prefix;
         try {
             if (slashIndex != -1) {
-                address = Net.toInetAddress(cidr.substring(0, slashIndex));
+                address = Net.toIPv4LiteralAddress(cidr.substring(0, slashIndex));
                 prefix = Integer.parseInt(cidr.substring(slashIndex + 1));
             } else {
-                address = Net.toInetAddress(cidr);
+                address = Net.toIPv4LiteralAddress(cidr);
                 prefix = 32;
+            }
+            if (prefix < 0 || prefix > 32) {
+                throw new InvalidCIDRException(cidr);
             }
             return new CIDR(address, prefix);
         } catch (IllegalArgumentException e) {

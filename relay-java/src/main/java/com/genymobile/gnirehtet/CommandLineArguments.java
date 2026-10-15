@@ -16,6 +16,8 @@
 
 package com.genymobile.gnirehtet;
 
+import java.util.regex.Pattern;
+
 /**
  * Simple specific command-line arguments parser.
  */
@@ -30,6 +32,12 @@ public class CommandLineArguments {
 
     public static final int DEFAULT_PORT = 31416;
 
+    private static final String IPV4_BYTE = "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+    private static final String IPV4 = IPV4_BYTE + "(\\." + IPV4_BYTE + "){3}";
+    private static final Pattern IPV4_LIST = Pattern.compile(IPV4 + "(," + IPV4 + ")*");
+    private static final String CIDR = IPV4 + "(/(3[0-2]|[12]?[0-9]))?";
+    private static final Pattern CIDR_LIST = Pattern.compile(CIDR + "(," + CIDR + ")*");
+
     private int port;
     private String serial;
     private String dnsServers;
@@ -43,28 +51,19 @@ public class CommandLineArguments {
                 if (arguments.dnsServers != null) {
                     throw new IllegalArgumentException("DNS servers already set");
                 }
-                if (i == args.length - 1) {
-                    throw new IllegalArgumentException("Missing -d parameter");
-                }
-                arguments.dnsServers = args[i + 1];
+                arguments.dnsServers = getOptionValue(args, i, "-d");
                 ++i; // consume the -d parameter
             } else if ((acceptedParameters & PARAM_ROUTES) != 0 && "-r".equals(arg)) {
                 if (arguments.routes != null) {
                     throw new IllegalArgumentException("Routes already set");
                 }
-                if (i == args.length - 1) {
-                    throw new IllegalArgumentException("Missing -r parameter");
-                }
-                arguments.routes = args[i + 1];
+                arguments.routes = getOptionValue(args, i, "-r");
                 ++i; // consume the -r parameter
             } else if ((acceptedParameters & PARAM_PORT) != 0 && "-p".equals(arg)) {
                 if (arguments.port != 0) {
                     throw new IllegalArgumentException("Port already set");
                 }
-                if (i == args.length - 1) {
-                    throw new IllegalArgumentException("Missing -p parameter");
-                }
-                arguments.port = Integer.parseInt(args[i + 1]);
+                arguments.port = Integer.parseInt(getOptionValue(args, i, "-p"));
                 if (arguments.port <= 0 || arguments.port >= 65536) {
                     throw new IllegalArgumentException("Invalid port: " + arguments.port);
                 }
@@ -79,6 +78,42 @@ public class CommandLineArguments {
             arguments.port = DEFAULT_PORT;
         }
         return arguments;
+    }
+
+    private static String getOptionValue(String[] args, int optionIndex, String option) {
+        if (optionIndex == args.length - 1 || args[optionIndex + 1].startsWith("-")) {
+            // a value starting with '-' is another option, the value is missing
+            throw new IllegalArgumentException("Missing " + option + " parameter");
+        }
+        return args[optionIndex + 1];
+    }
+
+    /**
+     * Check that {@code dnsServers} is a comma-separated list of IPv4 addresses.
+     * <p>
+     * The value is passed through "adb shell", so it must not contain any shell metacharacter.
+     *
+     * @param dnsServers the DNS servers
+     * @throws IllegalArgumentException if the value is invalid
+     */
+    public static void validateDnsServers(String dnsServers) {
+        if (dnsServers != null && !IPV4_LIST.matcher(dnsServers).matches()) {
+            throw new IllegalArgumentException("Invalid DNS servers (expected comma-separated IPv4 addresses): " + dnsServers);
+        }
+    }
+
+    /**
+     * Check that {@code routes} is a comma-separated list of IPv4 CIDR.
+     * <p>
+     * The value is passed through "adb shell", so it must not contain any shell metacharacter.
+     *
+     * @param routes the routes
+     * @throws IllegalArgumentException if the value is invalid
+     */
+    public static void validateRoutes(String routes) {
+        if (routes != null && !CIDR_LIST.matcher(routes).matches()) {
+            throw new IllegalArgumentException("Invalid routes (expected comma-separated IPv4 CIDR): " + routes);
+        }
     }
 
     public String getSerial() {

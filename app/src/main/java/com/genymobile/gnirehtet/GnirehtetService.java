@@ -178,6 +178,10 @@ public class GnirehtetService extends VpnService {
         Network[] networks = cm.getAllNetworks();
         for (Network network : networks) {
             LinkProperties linkProperties = cm.getLinkProperties(network);
+            if (linkProperties == null) {
+                // the network may have disconnected in the meantime
+                continue;
+            }
             List<LinkAddress> addresses = linkProperties.getLinkAddresses();
             for (LinkAddress addr : addresses) {
                 if (addr.getAddress().equals(VPN_ADDRESS)) {

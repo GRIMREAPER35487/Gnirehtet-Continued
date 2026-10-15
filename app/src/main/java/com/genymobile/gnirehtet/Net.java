@@ -19,8 +19,13 @@ package com.genymobile.gnirehtet;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.regex.Pattern;
 
 public final class Net {
+
+    private static final String IPV4_BYTE = "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+    private static final Pattern IPV4_LITERAL = Pattern.compile(IPV4_BYTE + "(\\." + IPV4_BYTE + "){3}");
+
     private Net() {
         // not instantiable
     }
@@ -39,6 +44,21 @@ public final class Net {
         } catch (UnknownHostException e) {
             throw new IllegalArgumentException(e);
         }
+    }
+
+    /**
+     * Parse a literal IPv4 address (never resolves a host name).
+     *
+     * @param address the dotted-decimal IPv4 address
+     * @return the address
+     * @throws IllegalArgumentException if {@code address} is not a literal IPv4 address
+     */
+    public static InetAddress toIPv4LiteralAddress(String address) {
+        if (!IPV4_LITERAL.matcher(address).matches()) {
+            throw new IllegalArgumentException("Not a literal IPv4 address: " + address);
+        }
+        // a literal address is parsed without any DNS lookup
+        return toInetAddress(address);
     }
 
     public static InetAddress toInetAddress(byte[] raw) {

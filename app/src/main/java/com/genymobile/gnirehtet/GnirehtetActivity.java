@@ -29,12 +29,29 @@ public class GnirehtetActivity extends Activity {
 
     private static final int VPN_REQUEST_CODE = 0;
 
+    private static final String STATE_REQUESTED_CONFIG = "requestedConfig";
+
     private VpnConfiguration requestedConfig;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null) {
+            requestedConfig = savedInstanceState.getParcelable(STATE_REQUESTED_CONFIG);
+            if (requestedConfig != null) {
+                // recreated while waiting for the VPN authorization: the result will be delivered to onActivityResult()
+                return;
+            }
+        }
         handleIntent(getIntent());
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (requestedConfig != null) {
+            outState.putParcelable(STATE_REQUESTED_CONFIG, requestedConfig);
+        }
     }
 
     private void handleIntent(Intent intent) {
