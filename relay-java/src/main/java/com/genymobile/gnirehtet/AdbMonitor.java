@@ -61,7 +61,10 @@ public class AdbMonitor {
     public void monitor() {
         while (true) {
             try {
-                trackDevices();
+                if (!trackDevices()) {
+                    // the daemon did not accept the request, do not flood it
+                    sleep(RETRY_DELAY_ADB_DAEMON_KO);
+                }
             } catch (Exception e) {
                 Log.e(TAG, "Failed to monitor adb devices", e);
                 repairAdbDaemon();
@@ -69,22 +72,23 @@ public class AdbMonitor {
         }
     }
 
-    private void trackDevices() throws IOException {
+    private boolean trackDevices() throws IOException {
         SocketChannel socketChannel = SocketChannel.open();
         try {
             socketChannel.connect(new InetSocketAddress(Inet4Address.getLoopbackAddress(), ADBD_PORT));
-            trackDevicesOnChannel(socketChannel);
+            return trackDevicesOnChannel(socketChannel);
         } finally {
             socketChannel.close();
         }
     }
 
-    private void trackDevicesOnChannel(ByteChannel channel) throws IOException {
+    private boolean trackDevicesOnChannel(ByteChannel channel) throws IOException {
         socketBuffer.clear();
         writeRequest(channel, TRACK_DEVICES_REQUEST);
         // the daemon initially sends "OKAY" if it understands the request
         if (!consumeOkay(channel)) {
-            return;
+            Log.w(TAG, "ADB daemon did not accept the track-devices request");
+            return false;
         }
         while (true) {
             String packet = nextPacket(channel);
@@ -141,14 +145,15 @@ public class AdbMonitor {
         //  - 0036 indicates that the data is 0x36 (54) bytes length
         //  - the device with serial 0123456789abcdef is connected
         //  - the device with serial fedcba9876543210 is unauthorized
+        int start = input.position();
         input.get(BUFFER, 0, LENGTH_FIELD_SIZE);
         int length = parseLength(BUFFER);
         if (length > BUFFER.length) {
             throw new IllegalArgumentException("Packet size should not be that big: " + length);
         }
         if (input.remaining() < length) {
-            // not enough data
-            input.rewind();
+            // not enough data, restore the position of this packet (not 0, earlier packets were already consumed)
+            input.position(start);
             return null;
         }
         input.get(BUFFER, 0, length);

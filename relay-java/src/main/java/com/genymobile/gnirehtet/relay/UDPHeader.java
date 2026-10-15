@@ -26,6 +26,7 @@ public class UDPHeader implements TransportHeader {
     private ByteBuffer raw;
     private int sourcePort;
     private int destinationPort;
+    private boolean valid;
 
     public UDPHeader(ByteBuffer raw) {
         wrap(raw);
@@ -34,9 +35,19 @@ public class UDPHeader implements TransportHeader {
     @Override
     public void wrap(ByteBuffer raw) {
         this.raw = raw;
+        valid = raw.limit() >= UDP_HEADER_LENGTH;
+        if (!valid) {
+            // truncated header
+            return;
+        }
         raw.limit(UDP_HEADER_LENGTH);
         sourcePort = Short.toUnsignedInt(raw.getShort(0));
         destinationPort = Short.toUnsignedInt(raw.getShort(2));
+    }
+
+    @Override
+    public boolean isValid() {
+        return valid;
     }
 
     @Override

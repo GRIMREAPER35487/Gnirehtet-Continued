@@ -258,4 +258,43 @@ public class TCPHeaderTest {
         long duration = System.currentTimeMillis() - start;
         System.out.println("5000000 TCP checksums: " + duration + "ms");
     }
+
+    @Test
+    public void testInvalidDataOffset() {
+        ByteBuffer buffer = createMockTCPHeader();
+        buffer.putShort(12, (short) (4 << 12)); // data offset = 4 (< 5)
+        TCPHeader header = new TCPHeader(buffer);
+        Assert.assertFalse(header.isValid());
+    }
+
+    @Test
+    public void testDataOffsetExceedingData() {
+        ByteBuffer buffer = createMockTCPHeader();
+        buffer.putShort(12, (short) (15 << 12)); // 60 bytes of header, only 20 available
+        TCPHeader header = new TCPHeader(buffer);
+        Assert.assertFalse(header.isValid());
+    }
+
+    @Test
+    public void testTruncatedTCPHeader() {
+        ByteBuffer buffer = createMockTCPHeader();
+        buffer.limit(10);
+        TCPHeader header = new TCPHeader(buffer);
+        Assert.assertFalse(header.isValid());
+    }
+
+    @Test
+    public void testPacketWithInvalidTCPHeaderIsInvalid() {
+        ByteBuffer buffer = createMockPacket();
+        buffer.putShort(32, (short) (4 << 12)); // data offset = 4
+        IPv4Packet packet = new IPv4Packet(buffer);
+        Assert.assertFalse(packet.isValid());
+    }
+
+    @Test
+    public void testValidPacket() {
+        IPv4Packet packet = new IPv4Packet(createMockPacket());
+        Assert.assertTrue(packet.isValid());
+        Assert.assertEquals(44, packet.getRawLength());
+    }
 }

@@ -17,9 +17,9 @@
 package com.genymobile.gnirehtet.relay;
 
 import java.io.PrintStream;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 public final class Log {
 
@@ -39,8 +39,9 @@ public final class Log {
 
     private static Level threshold = Level.INFO;
 
-    private static final DateFormat FORMAT = new SimpleDateFormat("YYYY-MM-dd HH:mm:ss.SSS");
-    private static final Date DATE = new Date();
+    // DateTimeFormatter is immutable and thread-safe; "yyyy" is the calendar year ("YYYY" is the week-based year)
+    private static final DateTimeFormatter FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+            .withZone(ZoneId.systemDefault());
 
     private Log() {
         // not instantiable
@@ -79,8 +80,7 @@ public final class Log {
     }
 
     private static String getDate() {
-        DATE.setTime(System.currentTimeMillis());
-        return FORMAT.format(DATE);
+        return FORMAT.format(Instant.now());
     }
 
     private static String format(Level level, String tag, String message) {

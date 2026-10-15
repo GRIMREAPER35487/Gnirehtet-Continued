@@ -53,10 +53,16 @@ public class IPv4Packet {
             ipv4Header.wrap(raw.duplicate());
         }
         if (!ipv4Header.isSupported()) {
-            Log.d(TAG, "Unsupported IPv4 headers");
+            Log.d(TAG, ipv4Header.isValid() ? "Unsupported IPv4 headers" : "Malformed IPv4 headers");
             transportHeader = null;
             return;
         }
+        if (ipv4Header.getTotalLength() > raw.limit()) {
+            Log.d(TAG, "Truncated IPv4 packet");
+            transportHeader = null;
+            return;
+        }
+        raw.limit(ipv4Header.getTotalLength());
 
         Class<? extends TransportHeader> expectedClass = getExpectedHeaderClass();
         if (transportHeader == null || !transportHeader.getClass().equals(expectedClass)) {
@@ -64,7 +70,10 @@ public class IPv4Packet {
         } else {
             transportHeader.wrap(getRawTransport());
         }
-        raw.limit(ipv4Header.getTotalLength());
+        if (!transportHeader.isValid()) {
+            Log.d(TAG, "Malformed transport headers");
+            transportHeader = null;
+        }
     }
 
     private Class<? extends TransportHeader> getExpectedHeaderClass() {

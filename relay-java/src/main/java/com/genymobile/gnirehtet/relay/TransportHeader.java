@@ -32,6 +32,13 @@ public interface TransportHeader {
 
     int getHeaderLength();
 
+    /**
+     * Indicate whether the wrapped header is well-formed (the other getters must not be used otherwise).
+     *
+     * @return {@code true} if the header is valid
+     */
+    boolean isValid();
+
     void setPayloadLength(int payloadLength);
 
     ByteBuffer getRaw();

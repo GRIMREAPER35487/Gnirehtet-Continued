@@ -28,6 +28,8 @@ public class TCPHeader implements TransportHeader {
     public static final int FLAG_ACK = 1 << 4;
     public static final int FLAG_URG = 1 << 5;
 
+    public static final int MIN_TCP_HEADER_LENGTH = 20;
+
     private ByteBuffer raw;
     private int sourcePort;
     private int destinationPort;
@@ -36,6 +38,7 @@ public class TCPHeader implements TransportHeader {
     private int acknowledgementNumber;
     private int flags;
     private int window;
+    private boolean valid;
 
     public TCPHeader(ByteBuffer raw) {
         wrap(raw);
@@ -44,6 +47,12 @@ public class TCPHeader implements TransportHeader {
     @Override
     public void wrap(ByteBuffer raw) {
         this.raw = raw;
+        valid = false;
+        if (raw.limit() < MIN_TCP_HEADER_LENGTH) {
+            // truncated header
+            headerLength = 0;
+            return;
+        }
         sourcePort = Short.toUnsignedInt(raw.getShort(0));
         destinationPort = Short.toUnsignedInt(raw.getShort(2));
 
@@ -55,6 +64,12 @@ public class TCPHeader implements TransportHeader {
         flags = dataOffsetAndFlags & 0x1ff;
 
         window = Short.toUnsignedInt(raw.getShort(14));
+
+        if (headerLength < MIN_TCP_HEADER_LENGTH || headerLength > raw.limit()) {
+            // data offset < 5, or options exceeding the available data
+            return;
+        }
+        valid = true;
 
         raw.limit(headerLength);
     }
@@ -101,6 +116,11 @@ public class TCPHeader implements TransportHeader {
     public void setAcknowledgementNumber(int acknowledgementNumber) {
         this.acknowledgementNumber = acknowledgementNumber;
         raw.putInt(8, acknowledgementNumber);
+    }
+
+    @Override
+    public boolean isValid() {
+        return valid;
     }
 
     @Override

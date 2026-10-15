@@ -135,4 +135,40 @@ public class IPv4PacketBufferTest {
         Assert.assertEquals(1234, udpHeader.getSourcePort());
         Assert.assertEquals(5678, udpHeader.getDestinationPort());
     }
+
+    @Test
+    public void testDropInvalidLengthPacket() throws IOException {
+        IPv4PacketBuffer packetBuffer = new IPv4PacketBuffer();
+
+        ByteBuffer invalid = createMockPacket();
+        invalid.putShort(2, (short) 0); // total length = 0
+        packetBuffer.readFrom(contentToChannel(invalid));
+        Assert.assertNull(packetBuffer.asIPv4Packet());
+
+        // the buffer must have been emptied, a following valid packet must be parsed
+        packetBuffer.readFrom(contentToChannel(createMockPacket()));
+        IPv4Packet packet = packetBuffer.asIPv4Packet();
+        Assert.assertNotNull(packet);
+        checkPacketHeaders(packet);
+    }
+
+    @Test
+    public void testMalformedHeaderIsInvalid() throws IOException {
+        IPv4PacketBuffer packetBuffer = new IPv4PacketBuffer();
+
+        ByteBuffer malformed = createMockPacket();
+        malformed.put(0, (byte) ((4 << 4) | 3)); // IHL = 3
+        packetBuffer.readFrom(contentToChannel(malformed));
+        IPv4Packet packet = packetBuffer.asIPv4Packet();
+        Assert.assertNotNull(packet);
+        Assert.assertFalse(packet.isValid());
+        packetBuffer.next();
+
+        // the stream is still in sync
+        packetBuffer.readFrom(contentToChannel(createMockPacket()));
+        packet = packetBuffer.asIPv4Packet();
+        Assert.assertNotNull(packet);
+        Assert.assertTrue(packet.isValid());
+        checkPacketHeaders(packet);
+    }
 }

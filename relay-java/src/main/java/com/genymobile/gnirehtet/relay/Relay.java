@@ -65,7 +65,12 @@ public class Relay {
 
             for (SelectionKey selectedKey : selectedKeys) {
                 SelectionHandler selectionHandler = (SelectionHandler) selectedKey.attachment();
-                selectionHandler.onReady(selectedKey);
+                try {
+                    selectionHandler.onReady(selectedKey);
+                } catch (RuntimeException e) {
+                    // a single bad packet or connection must not kill the whole relay
+                    Log.e(TAG, "Unexpected error while handling a selection", e);
+                }
             }
             // by design, we handled everything
             selectedKeys.clear();

@@ -22,18 +22,26 @@ import java.nio.channels.ReadableByteChannel;
 
 public class IPv4PacketBuffer {
 
+    private static final String TAG = IPv4PacketBuffer.class.getSimpleName();
+
+    private static final int MIN_PACKET_LENGTH = 20;
+
     private final ByteBuffer buffer = ByteBuffer.allocate(IPv4Packet.MAX_PACKET_LENGTH);
 
     public int readFrom(ReadableByteChannel channel) throws IOException {
         return channel.read(buffer);
     }
 
-    @SuppressWarnings("checkstyle:MagicNumber")
     private int getAvailablePacketLength() {
         int length = IPv4Header.readLength(buffer);
-        assert length == -1 || IPv4Header.readVersion(buffer) == 4 : "This function must not be called when the packet is not IPv4";
         if (length == -1) {
             // no packet
+            return 0;
+        }
+        if (length < MIN_PACKET_LENGTH) {
+            // the stream is corrupted, there is no way to find the next packet boundary
+            Log.w(TAG, "Invalid IPv4 packet length (" + length + "), dropping buffered data");
+            buffer.position(buffer.limit());
             return 0;
         }
         if (length > buffer.remaining()) {
@@ -52,6 +60,7 @@ public class IPv4PacketBuffer {
             buffer.compact();
             return null;
         }
+        // malformed headers are detected by IPv4Packet.isValid(), the packet is then dropped by the Router
         int limit = buffer.limit();
         buffer.limit(length).position(0);
         ByteBuffer packetBuffer = buffer.slice();

@@ -147,9 +147,8 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
                     logd(TAG, "Sending ACK " + numbers() + " to client");
                     sendEmptyPacketToClient(TCPHeader.FLAG_ACK);
                 }
-            } else {
-                close();
             }
+            // w == 0: the socket send buffer is full, wait for the next OP_WRITE
         } catch (IOException e) {
             loge(TAG, "Cannot write", e);
             resetConnection();
@@ -195,9 +194,15 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     private SocketChannel createChannel() throws IOException {
         logi(TAG, "Open");
         SocketChannel socketChannel = SocketChannel.open();
-        socketChannel.configureBlocking(false);
-        socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
-        socketChannel.connect(getRewrittenDestination());
+        try {
+            socketChannel.configureBlocking(false);
+            socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
+            socketChannel.connect(getRewrittenDestination());
+        } catch (IOException e) {
+            // do not leak the channel
+            socketChannel.close();
+            throw e;
+        }
         return socketChannel;
     }
 
@@ -375,8 +380,15 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     private void processConnect() {
         logd(TAG, "processConnect()");
-        if (!finishConnect()) {
-            close();
+        try {
+            if (!channel.finishConnect()) {
+                // connection still pending, wait for the next OP_CONNECT
+                return;
+            }
+        } catch (IOException e) {
+            loge(TAG, "Cannot finish connect", e);
+            // notify the client that the connection failed
+            resetConnection();
             return;
         }
         logd(TAG, "SYN_RECEIVED, acking " + numbers());
@@ -384,15 +396,6 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         logd(TAG, "State = " + state);
         sendEmptyPacketToClient(TCPHeader.FLAG_SYN | TCPHeader.FLAG_ACK);
         ++sequenceNumber; // SYN counts for 1 byte
-    }
-
-    private boolean finishConnect() {
-        try {
-            return channel.finishConnect();
-        } catch (IOException e) {
-            loge(TAG, "Cannot finish connect", e);
-            return false;
-        }
     }
 
     private void resetConnection() {

@@ -52,6 +52,7 @@ public class IPv4Header {
     private int headerLength;
     private int totalLength;
     private Protocol protocol;
+    private boolean valid;
     private int source;
     private int destination;
 
@@ -60,8 +61,17 @@ public class IPv4Header {
     }
 
     public void wrap(ByteBuffer raw) {
-        assert raw.limit() >= MIN_IPV4_HEADER_LENGTH : "IPv4 headers length must be at least 20 bytes";
         this.raw = raw;
+        valid = false;
+        protocol = Protocol.OTHER;
+
+        if (raw.limit() < MIN_IPV4_HEADER_LENGTH) {
+            // malformed: not even a minimal header
+            version = 0;
+            headerLength = 0;
+            totalLength = 0;
+            return;
+        }
 
         byte versionAndIHL = raw.get(0);
         version = (byte) (versionAndIHL >> 4);
@@ -69,9 +79,15 @@ public class IPv4Header {
         byte ihl = (byte) (versionAndIHL & 0xf);
         headerLength = ihl << 2;
 
-        raw.limit(headerLength);
-
         totalLength = Short.toUnsignedInt(raw.getShort(2));
+
+        if (headerLength < MIN_IPV4_HEADER_LENGTH || headerLength > raw.limit() || totalLength < headerLength) {
+            // malformed: IHL < 5, header truncated, or header longer than the whole packet
+            return;
+        }
+        valid = true;
+
+        raw.limit(headerLength);
         //raw.limit(); // by design
         //assert totalLength == Binary.unsigned(raw.getShort(2)) : "Inconsistent packet length";
 
@@ -82,8 +98,12 @@ public class IPv4Header {
         destination = raw.getInt(16);
     }
 
+    public boolean isValid() {
+        return valid;
+    }
+
     public boolean isSupported() {
-        return version == 4 && protocol != Protocol.OTHER;
+        return valid && version == 4 && protocol != Protocol.OTHER;
     }
 
     public Protocol getProtocol() {

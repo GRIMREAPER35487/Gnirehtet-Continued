@@ -157,4 +157,39 @@ public class IPv4HeaderTest {
         long duration = System.currentTimeMillis() - start;
         System.out.println("5000000 IP checksums: " + duration + "ms");
     }
+
+    @Test
+    public void testInvalidIHL() {
+        ByteBuffer buffer = createMockHeaders();
+        buffer.put(0, (byte) ((4 << 4) | 4)); // IHL = 4 (< 5)
+        IPv4Header header = new IPv4Header(buffer);
+        Assert.assertFalse(header.isValid());
+        Assert.assertFalse(header.isSupported());
+    }
+
+    @Test
+    public void testHeaderLongerThanPacket() {
+        ByteBuffer buffer = createMockHeaders();
+        buffer.put(0, (byte) ((4 << 4) | 15)); // IHL = 15 (60 bytes) but only 28 bytes available
+        IPv4Header header = new IPv4Header(buffer);
+        Assert.assertFalse(header.isValid());
+        Assert.assertFalse(header.isSupported());
+    }
+
+    @Test
+    public void testTotalLengthSmallerThanHeader() {
+        ByteBuffer buffer = createMockHeaders();
+        buffer.putShort(2, (short) 10); // total length < header length
+        IPv4Header header = new IPv4Header(buffer);
+        Assert.assertFalse(header.isValid());
+    }
+
+    @Test
+    public void testTruncatedHeader() {
+        ByteBuffer buffer = createMockHeaders();
+        buffer.limit(12);
+        IPv4Header header = new IPv4Header(buffer);
+        Assert.assertFalse(header.isValid());
+        Assert.assertFalse(header.isSupported());
+    }
 }

@@ -44,6 +44,10 @@ public class TunnelServer {
 
     private void acceptClient(Selector selector, ServerSocketChannel serverSocketChannel) throws IOException {
         SocketChannel socketChannel = serverSocketChannel.accept();
+        if (socketChannel == null) {
+            // spurious wakeup, no pending connection
+            return;
+        }
         socketChannel.configureBlocking(false);
         socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
         socketChannel.setOption(StandardSocketOptions.SO_SNDBUF, 2 * 1024 * 1024);

@@ -111,4 +111,15 @@ public class AdbMonitorTest {
         Assert.assertEquals("FEDCBA9876543210", pSerials[1]);
         Assert.assertEquals("FEDCBA9876543210", pSerials[2]);
     }
+
+    @Test
+    public void testReadShortPacketAfterCompletePacket() {
+        String data = "00180123456789ABCDEF\tdevice\n00180123456789ABCDEF\tdevi";
+        ByteBuffer buffer = toByteBuffer(data);
+        Assert.assertEquals("0123456789ABCDEF\tdevice\n", AdbMonitor.readPacket(buffer));
+        int secondPacketPosition = buffer.position();
+        Assert.assertNull(AdbMonitor.readPacket(buffer));
+        Assert.assertEquals("Position must be restored to the start of the incomplete packet",
+                secondPacketPosition, buffer.position());
+    }
 }
