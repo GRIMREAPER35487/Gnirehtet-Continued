@@ -22,6 +22,7 @@ limitations under the License.
 import argparse
 import errno
 import glob
+import hashlib
 import ipaddress
 import json
 import os
@@ -681,8 +682,9 @@ class GnirehtetSupervisor:
         self.native_failures = 0
         self.native_retry_at = 0.0
 
-    def run_adb(self, args: List[str], timeout: float = ADB_TIMEOUT_SEC) -> Tuple[int, str]:
-        """Runs an adb command with timeout protection against USB hangs."""
+    def run_adb(self, args: List[str], timeout: float = ADB_TIMEOUT_SEC, merge_output: bool = False) -> Tuple[int, str]:
+        """Runs an adb command with timeout protection against USB hangs.
+        With merge_output, returns stdout and stderr together (adb install reports failures on stderr)."""
         cmd = [self.adb] + args
         try:
             res = subprocess.run(
@@ -693,6 +695,8 @@ class GnirehtetSupervisor:
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             self.adb_fail_count = 0
+            if merge_output:
+                return res.returncode, ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
             return res.returncode, (res.stdout or res.stderr).strip()
         except subprocess.TimeoutExpired:
             self.adb_fail_count += 1
@@ -961,6 +965,60 @@ class GnirehtetSupervisor:
         code, out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr"])
         return code == 0 and f"{VPN_CLIENT_ADDRESS}/" in out
 
+    @staticmethod
+    def find_apk() -> Optional[str]:
+        """Locates the gnirehtet APK bundled next to this script (or a local release build)."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        for candidate in [
+            os.path.join(script_dir, "gnirehtet.apk"),
+            os.path.join(script_dir, "app", "build", "outputs", "apk", "release", "gnirehtet-release.apk"),
+        ]:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def ensure_apk_up_to_date(self, serial: str):
+        """Installs the bundled APK if the app is missing on the device, or if the installed APK is a
+        different build (compared by SHA-256: Android keeps the installed APK file unchanged)."""
+        apk_path = self.find_apk()
+        if not apk_path:
+            return
+        with open(apk_path, "rb") as f:
+            local_hash = hashlib.sha256(f.read()).hexdigest()
+
+        code, out = self.run_adb(["-s", serial, "shell", "pm", "path", "com.genymobile.gnirehtet"])
+        installed_path = None
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("package:") and line.endswith("base.apk"):
+                installed_path = line[len("package:"):]
+                break
+            if line.startswith("package:") and installed_path is None:
+                installed_path = line[len("package:"):]
+
+        if installed_path is None:
+            reason = "missing"
+        else:
+            code, out = self.run_adb(["-s", serial, "shell", "sha256sum", installed_path])
+            remote_hash = out.split()[0].lower() if code == 0 and out.split() else None
+            if remote_hash is None:
+                return  # cannot compare (no sha256sum on the device): keep the installed app
+            if remote_hash == local_hash:
+                return
+            reason = "outdated"
+
+        log_info(f"Gnirehtet APK {reason} on [{serial}]. Installing {os.path.basename(apk_path)}...")
+        code, out = self.run_adb(["-s", serial, "install", "-r", apk_path], timeout=30.0, merge_output=True)
+        if code == 0 and "Success" in out:
+            log_success(f"Gnirehtet APK installed on [{serial}].")
+        elif "VERSION_DOWNGRADE" in out:
+            log_warn(f"The installed app on [{serial}] is newer than {os.path.basename(apk_path)}; keeping it.")
+        elif "UPDATE_INCOMPATIBLE" in out:
+            log_warn(f"The installed app on [{serial}] is signed with a different key. "
+                     f"Uninstall it (adb uninstall com.genymobile.gnirehtet) to install the bundled APK.")
+        else:
+            log_warn(f"APK install failed on [{serial}]: {out}")
+
     def setup_headset_tether(self, serial: str) -> bool:
         """Sets up high-speed Native USB transport or fallback legacy reverse tunnel."""
         log_info(f"Device connected: [{serial}]. Configuring tether...")
@@ -991,18 +1049,8 @@ class GnirehtetSupervisor:
                     log_warn(f"Native USB unavailable (next attempt in {int(delay)}s). Falling back to default ADB reverse tunnel...")
 
         if not self.active_native_mode:
-            # Legacy mode: verify APK is installed
-            code, out = self.run_adb(["-s", serial, "shell", "pm", "path", "com.genymobile.gnirehtet"])
-            if "package:" not in out:
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                apk_path = os.path.join(script_dir, "gnirehtet.apk")
-                if not os.path.isfile(apk_path):
-                    candidate = os.path.join(script_dir, "app", "build", "outputs", "apk", "release", "gnirehtet-release.apk")
-                    if os.path.isfile(candidate):
-                        apk_path = candidate
-                if os.path.isfile(apk_path):
-                    log_info(f"Gnirehtet APK missing on [{serial}]. Auto-installing {os.path.basename(apk_path)}...")
-                    self.run_adb(["-s", serial, "install", "-r", apk_path], timeout=15.0)
+            # Legacy mode: install the bundled APK if it is missing or differs from the installed one
+            self.ensure_apk_up_to_date(serial)
 
             # Ensure relay server is running for legacy reverse mode
             self.start_relay_server()
