@@ -12,8 +12,8 @@ android {
         applicationId = "com.genymobile.gnirehtet"
         minSdk = 21
         targetSdk = 29 // must stay at 29 (no foregroundServiceType / POST_NOTIFICATIONS handling)
-        versionCode = 19
-        versionName = "2.7.0-beta.5"
+        versionCode = 20
+        versionName = "2.7.0-beta.6"
     }
     buildTypes {
         release {
