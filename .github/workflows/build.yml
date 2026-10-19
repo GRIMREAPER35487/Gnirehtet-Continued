@@ -66,9 +66,27 @@ jobs:
       - name: Compile Android Client
         id: compile_apk
         continue-on-error: true
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
+          SIGNING_ARGS=()
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            # Sign with the stable release key, so that updates install over the previous version
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            SIGNING_ARGS=(
+              "-PRELEASE_STORE_FILE=$RUNNER_TEMP/release.jks"
+              "-PRELEASE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
+              "-PRELEASE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
+              "-PRELEASE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
+            )
+          else
+            echo "::warning::RELEASE_KEYSTORE_BASE64 is not set: the APK is signed with a throwaway debug key"
+          fi
+          ./gradlew assembleRelease --stacktrace "${SIGNING_ARGS[@]}"
 
       - name: Locate and prepare APK
         run: |

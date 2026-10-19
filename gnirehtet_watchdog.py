@@ -1014,8 +1014,15 @@ class GnirehtetSupervisor:
         elif "VERSION_DOWNGRADE" in out:
             log_warn(f"The installed app on [{serial}] is newer than {os.path.basename(apk_path)}; keeping it.")
         elif "UPDATE_INCOMPATIBLE" in out:
-            log_warn(f"The installed app on [{serial}] is signed with a different key. "
-                     f"Uninstall it (adb uninstall com.genymobile.gnirehtet) to install the bundled APK.")
+            # Android refuses updates signed with another key: replace the app (the VPN permission
+            # prompt will be shown again on the headset)
+            log_warn(f"The installed app on [{serial}] is signed with a different key. Reinstalling it...")
+            self.run_adb(["-s", serial, "uninstall", "com.genymobile.gnirehtet"], timeout=15.0)
+            code, out = self.run_adb(["-s", serial, "install", apk_path], timeout=30.0, merge_output=True)
+            if code == 0 and "Success" in out:
+                log_success(f"Gnirehtet APK reinstalled on [{serial}]. Accept the VPN prompt on the headset.")
+            else:
+                log_warn(f"APK install failed on [{serial}]: {out}")
         else:
             log_warn(f"APK install failed on [{serial}]: {out}")
 
