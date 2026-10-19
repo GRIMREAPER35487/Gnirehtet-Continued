@@ -53,6 +53,10 @@ HIGH_PRIORITY_CLASS = 0x00000080 if os.name == "nt" else 0
 NATIVE_RETRY_BASE_DELAY = 10.0
 NATIVE_RETRY_MAX_DELAY = 300.0
 
+# Legacy mode: address of the gnirehtet VPN interface on the device, and how long to wait for it after "am start"
+VPN_CLIENT_ADDRESS = "10.0.0.2"
+VPN_START_TIMEOUT_SEC = 15.0
+
 
 class Colors:
     CYAN = "\033[96m" if sys.stdout.isatty() else ""
@@ -668,6 +672,7 @@ class GnirehtetSupervisor:
 
         self.relay_process: Optional[subprocess.Popen] = None
         self.current_serial: Optional[str] = None
+        self.setup_failures = 0
         self.is_connected = False
         self.adb_fail_count = 0
         self.running = True
@@ -947,14 +952,23 @@ class GnirehtetSupervisor:
             if code != 0 or not out.strip():
                 return False
             code, out = self.run_adb(["-s", serial, "reverse", "--list"])
-            return code == 0 and "localabstract:gnirehtet" in out
+            if code != 0 or "localabstract:gnirehtet" not in out:
+                return False
+            return self.is_vpn_up(serial)
+
+    def is_vpn_up(self, serial: str) -> bool:
+        """True if the gnirehtet VPN interface (address 10.0.0.2) is up on the device."""
+        code, out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr"])
+        return code == 0 and f"{VPN_CLIENT_ADDRESS}/" in out
 
     def setup_headset_tether(self, serial: str) -> bool:
         """Sets up high-speed Native USB transport or fallback legacy reverse tunnel."""
         log_info(f"Device connected: [{serial}]. Configuring tether...")
 
-        # 1. Stop any stale VPN instance (ensures no VpnService swallows the native hardware link)
-        self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
+        # 1. Stop any stale VPN instance (ensures no VpnService swallows the native hardware link).
+        # On quick retries, keep the app alive so a pending VPN permission prompt is not killed every cycle.
+        if self.setup_failures % 3 == 0:
+            self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
         # 2. Determine transport mode: Standard ADB reverse (default) vs Native USB (experimental)
         relay_host: Optional[str] = None
@@ -1008,12 +1022,21 @@ class GnirehtetSupervisor:
                 "-n", "com.genymobile.gnirehtet/.GnirehtetActivity",
                 "--esa", "dnsServers", "1.1.1.1,8.8.8.8",
             ]
+            # A headset that sits idle (screen off) may defer the activity launch, so the VPN never starts
+            self.run_adb(["-s", serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"])
             code, out = self.run_adb(intent_cmd)
             if code != 0:
                 log_error(f"Failed to start Android VPN service: {out}")
                 return False
 
-            time.sleep(0.5)
+            # "am start" succeeding does not mean the VPN is up: wait until the tunnel interface exists
+            deadline = time.time() + VPN_START_TIMEOUT_SEC
+            while not self.is_vpn_up(serial):
+                if time.time() >= deadline:
+                    log_warn(f"VPN did not come up on [{serial}]. Wake the headset (or accept the VPN prompt); retrying...")
+                    return False
+                time.sleep(0.5)
+
             log_success(f"Tether active and running on [{serial}] via Legacy ADB Reverse!")
             return True
         else:
@@ -1043,6 +1066,7 @@ class GnirehtetSupervisor:
 
     def handle_disconnect(self):
         """Handles link drop and state reset."""
+        self.setup_failures = 0
         if self.is_connected:
             log_warn("Device disconnected or cable wiggled! Auto-recovery active...")
             self.is_connected = False
@@ -1114,7 +1138,9 @@ class GnirehtetSupervisor:
                     success = self.setup_headset_tether(chosen_serial)
                     if success:
                         self.is_connected = True
+                        self.setup_failures = 0
                     else:
+                        self.setup_failures += 1
                         time.sleep(2.0)
                         continue
 
