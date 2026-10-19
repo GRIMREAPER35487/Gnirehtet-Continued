@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
 public final class Main {
     private static final String TAG = "Gnirehtet";
     private static final String NL = System.lineSeparator();
-    private static final String REQUIRED_APK_VERSION_CODE = "21";
+    private static final String REQUIRED_APK_VERSION_CODE = "22";
     private static boolean debugMode = false;
     private static boolean firstConnectionDetected = false;
 
