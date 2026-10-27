@@ -57,6 +57,11 @@ NATIVE_RETRY_MAX_DELAY = 300.0
 # Legacy mode: address of the gnirehtet VPN interface on the device, and how long to wait for it after "am start"
 VPN_CLIENT_ADDRESS = "10.0.0.2"
 VPN_START_TIMEOUT_SEC = 15.0
+# Legacy mode: a live tether always keeps one client connected to the relay; restart the tether after this long without one
+RELAY_NO_CLIENT_TIMEOUT_SEC = 20.0
+# Minimum delay between two "adb reconnect offline" attempts
+ADB_RECONNECT_INTERVAL_SEC = 10.0
+RELAY_CLIENT_EVENT = re.compile(r"Client #(\d+) (connected|disconnected)")
 
 
 class Colors:
@@ -674,6 +679,11 @@ class GnirehtetSupervisor:
         self.relay_process: Optional[subprocess.Popen] = None
         self.current_serial: Optional[str] = None
         self.setup_failures = 0
+        # Relay clients currently connected (tracked from the managed relay's log), and since when there is none
+        self.relay_clients = set()
+        self.relay_clients_lock = threading.Lock()
+        self.relay_no_client_since: Optional[float] = time.time()
+        self.last_adb_reconnect = 0.0
         self.is_connected = False
         self.adb_fail_count = 0
         self.running = True
@@ -749,6 +759,9 @@ class GnirehtetSupervisor:
 
         cmd = [self.java] + self.jvm_args + ["-jar", self.jar, "relay", "-p", str(self.port)]
         
+        with self.relay_clients_lock:
+            self.relay_clients.clear()
+            self.relay_no_client_since = time.time()
         self.relay_process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -772,6 +785,7 @@ class GnirehtetSupervisor:
                     clean_line = line.strip()
                     if not clean_line:
                         continue
+                    self.track_relay_client(clean_line)
                     # Print connection lifecycle and packet stream in real time
                     if self.verbose:
                         print(f"[{time.strftime('%H:%M:%S')}] {Colors.CYAN}[RELAY]{Colors.RESET} {clean_line}")
@@ -959,6 +973,38 @@ class GnirehtetSupervisor:
             if code != 0 or "localabstract:gnirehtet" not in out:
                 return False
             return self.is_vpn_up(serial)
+
+    def track_relay_client(self, line: str):
+        """Keeps track of the relay clients from the relay log ("Client #N connected/disconnected")."""
+        m = RELAY_CLIENT_EVENT.search(line)
+        if not m:
+            return
+        with self.relay_clients_lock:
+            if m.group(2) == "connected":
+                self.relay_clients.add(m.group(1))
+                self.relay_no_client_since = None
+            else:
+                self.relay_clients.discard(m.group(1))
+                if not self.relay_clients and self.relay_no_client_since is None:
+                    self.relay_no_client_since = time.time()
+
+    def relay_has_lost_client(self) -> bool:
+        """True if the managed relay has had no client for too long (the device side of the tunnel is dead).
+        Not applicable to an external relay, whose log is not visible."""
+        if not self.relay_process or self.relay_process.poll() is not None:
+            return False
+        with self.relay_clients_lock:
+            since = self.relay_no_client_since
+        return since is not None and time.time() - since > RELAY_NO_CLIENT_TIMEOUT_SEC
+
+    def reconnect_offline_devices(self, devices: List[Tuple[str, str]]):
+        """A USB hiccup often leaves the device "offline" in adb until it is replugged: ask adb to reconnect it."""
+        offline = [s for s, state in devices if state == "offline"]
+        if not offline or time.time() - self.last_adb_reconnect < ADB_RECONNECT_INTERVAL_SEC:
+            return
+        self.last_adb_reconnect = time.time()
+        log_warn(f"Device offline in adb: [{', '.join(offline)}]. Reconnecting...")
+        self.run_adb(["reconnect", "offline"], timeout=10.0)
 
     def is_vpn_up(self, serial: str) -> bool:
         """True if the gnirehtet VPN interface (address 10.0.0.2) is up on the device."""
@@ -1174,6 +1220,7 @@ class GnirehtetSupervisor:
 
                 if unauth_devices:
                     log_warn("Device unauthorized! Check headset/phone to allow USB debugging.")
+                self.reconnect_offline_devices(devices)
 
                 # Filter target serial if specified
                 if self.target_serial:
@@ -1194,6 +1241,9 @@ class GnirehtetSupervisor:
                     if success:
                         self.is_connected = True
                         self.setup_failures = 0
+                        with self.relay_clients_lock:
+                            if not self.relay_clients:
+                                self.relay_no_client_since = time.time()  # give the new tunnel time to connect
                     else:
                         self.setup_failures += 1
                         time.sleep(2.0)
@@ -1203,6 +1253,11 @@ class GnirehtetSupervisor:
                 if self.is_connected:
                     if not self.check_tunnel_health(chosen_serial):
                         log_warn("Tether link degraded or disconnected. Re-establishing...")
+                        self.handle_disconnect()
+                        time.sleep(1.0)
+                        continue
+                    if not self.active_native_mode and self.relay_has_lost_client():
+                        log_warn(f"No device connected to the relay for {RELAY_NO_CLIENT_TIMEOUT_SEC:.0f}s. Restarting the tether...")
                         self.handle_disconnect()
                         time.sleep(1.0)
                         continue

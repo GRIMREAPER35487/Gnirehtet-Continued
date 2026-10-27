@@ -240,6 +240,12 @@ public class GnirehtetService extends VpnService {
                     Log.d(TAG, "Relay tunnel disconnected");
                     vpnService.notifier.setFailure(true);
                     break;
+                case RelayTunnelListener.MSG_FORWARDING_STOPPED:
+                    // close the VPN rather than keep it up with a dead forwarder: the watchdog notices that
+                    // the VPN is down and restarts it
+                    Log.w(TAG, "Forwarding stopped unexpectedly, closing the VPN");
+                    vpnService.close();
+                    break;
                 default:
             }
         }

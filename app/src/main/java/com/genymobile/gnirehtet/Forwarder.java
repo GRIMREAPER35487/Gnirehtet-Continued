@@ -45,6 +45,8 @@ public class Forwarder {
 
     private final FileDescriptor vpnFileDescriptor;
     private final PersistentRelayTunnel tunnel;
+    private final RelayTunnelListener listener;
+    private volatile boolean stopped;
 
     private Future<?> deviceToTunnelFuture;
     private Future<?> tunnelToDeviceFuture;
@@ -56,7 +58,15 @@ public class Forwarder {
     public Forwarder(VpnService vpnService, FileDescriptor vpnFileDescriptor, RelayTunnelListener listener,
                      String relayHost, int relayPort) {
         this.vpnFileDescriptor = vpnFileDescriptor;
+        this.listener = listener;
         tunnel = new PersistentRelayTunnel(vpnService, listener, relayHost, relayPort);
+    }
+
+    private void onForwardingThreadEnded() {
+        if (!stopped && listener != null) {
+            // the other direction may still run, but the link is broken: let the service close the VPN
+            listener.notifyForwardingStopped();
+        }
     }
 
     public void forward() {
@@ -67,8 +77,10 @@ public class Forwarder {
                     forwardDeviceToTunnel(tunnel);
                 } catch (InterruptedIOException e) {
                     Log.d(TAG, "Device to tunnel interrupted");
-                } catch (IOException e) {
+                } catch (IOException | RuntimeException e) {
                     Log.e(TAG, "Device to tunnel exception", e);
+                } finally {
+                    onForwardingThreadEnded();
                 }
             }
         });
@@ -78,15 +90,18 @@ public class Forwarder {
                 try {
                     forwardTunnelToDevice(tunnel);
                 } catch (InterruptedIOException e) {
-                    Log.d(TAG, "Device to tunnel interrupted");
-                } catch (IOException e) {
+                    Log.d(TAG, "Tunnel to device interrupted");
+                } catch (IOException | RuntimeException e) {
                     Log.e(TAG, "Tunnel to device exception", e);
+                } finally {
+                    onForwardingThreadEnded();
                 }
             }
         });
     }
 
     public void stop() {
+        stopped = true;
         tunnel.close();
         tunnelToDeviceFuture.cancel(true);
         deviceToTunnelFuture.cancel(true);
