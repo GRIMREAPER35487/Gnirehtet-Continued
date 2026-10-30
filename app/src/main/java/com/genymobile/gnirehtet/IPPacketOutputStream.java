@@ -86,6 +86,15 @@ public class IPPacketOutputStream extends OutputStream {
             throw new IOException("IPPacketOutputStream buffer is full");
         }
         int r = source.receiveTo(buffer.array(), buffer.arrayOffset() + position, remaining);
+        // always consume the flag, even if nothing is buffered (it must not apply to a later partial packet)
+        boolean streamChanged = source.takeReceiveStreamChanged();
+        if (r > 0 && position > 0 && streamChanged) {
+            // the data before "position" (a partial packet) belong to the previous tunnel connection, which is lost:
+            // keep only the new data, which start at a packet boundary
+            Log.d(TAG, "Tunnel reconnected, dropping " + position + " buffered bytes");
+            System.arraycopy(buffer.array(), buffer.arrayOffset() + position, buffer.array(), buffer.arrayOffset(), r);
+            position = 0;
+        }
         if (r > 0) {
             buffer.position(position + r);
             buffer.flip();

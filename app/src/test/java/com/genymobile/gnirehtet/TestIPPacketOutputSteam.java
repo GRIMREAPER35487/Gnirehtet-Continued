@@ -136,4 +136,73 @@ public class TestIPPacketOutputSteam {
         pos.write(rawPacket, 0, rawPacket.length);
         Assert.assertTrue(Arrays.equals(rawPacket, bos.toByteArray()));
     }
+
+    /**
+     * Tunnel returning predefined chunks, possibly from a new underlying connection.
+     */
+    private static final class ChunkTunnel implements Tunnel {
+        private final byte[][] chunks;
+        private final boolean[] newStream;
+        private int index;
+        private boolean changed;
+
+        ChunkTunnel(byte[][] chunks, boolean[] newStream) {
+            this.chunks = chunks;
+            this.newStream = newStream;
+        }
+
+        @Override
+        public void send(byte[] packet, int len) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int receiveTo(byte[] buffer, int offset, int maxLen) {
+            if (index == chunks.length) {
+                return -1;
+            }
+            changed |= newStream[index];
+            byte[] chunk = chunks[index++];
+            System.arraycopy(chunk, 0, buffer, offset, chunk.length);
+            return chunk.length;
+        }
+
+        @Override
+        public boolean takeReceiveStreamChanged() {
+            boolean result = changed;
+            changed = false;
+            return result;
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    @Test
+    public void testPartialPacketDroppedOnTunnelReconnection() throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        IPPacketOutputStream pos = new IPPacketOutputStream(bos);
+
+        byte[] rawPacket = createMockPacket().array();
+        byte[] partial = Arrays.copyOf(rawPacket, 14);
+        // the connection drops after a partial packet; the new connection starts with a full packet
+        ChunkTunnel tunnel = new ChunkTunnel(new byte[][] {partial, rawPacket}, new boolean[] {false, true});
+
+        Assert.assertEquals(14, pos.readFrom(tunnel));
+        Assert.assertEquals(0, bos.size());
+        Assert.assertEquals(32, pos.readFrom(tunnel));
+        Assert.assertTrue("Only the packet of the new connection must be written", Arrays.equals(rawPacket, bos.toByteArray()));
+    }
+
+    @Test
+    public void testSessionPacketFormat() {
+        byte[] packet = SessionPacket.create(0x1122334455667788L);
+        Assert.assertEquals(32, packet.length);
+        Assert.assertEquals(0x45, packet[0] & 0xff);
+        Assert.assertEquals(32, ((packet[2] & 0xff) << 8) | (packet[3] & 0xff));
+        Assert.assertEquals(253, packet[9] & 0xff);
+        Assert.assertEquals("GNRS", new String(packet, 20, 4, java.nio.charset.StandardCharsets.US_ASCII));
+        Assert.assertEquals(0x1122334455667788L, ByteBuffer.wrap(packet, 24, 8).getLong());
+    }
 }

@@ -83,6 +83,8 @@ public class GnirehtetService extends VpnService {
         if (ACTION_START_VPN.equals(action)) {
             if (isRunning()) {
                 Log.d(TAG, "VPN already running, ignore START request");
+                // startForegroundService() requires a call to startForeground(), even if already in foreground
+                notifier.ensureForeground();
             } else {
                 VpnConfiguration config = intent.getParcelableExtra(EXTRA_VPN_CONFIGURATION);
                 if (config == null) {

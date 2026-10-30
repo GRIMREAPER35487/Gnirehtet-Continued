@@ -33,20 +33,22 @@ public class RelayTunnelProvider {
     private final RelayTunnelListener listener;
     private final String relayHost;
     private final int relayPort;
+    private final long sessionToken;
     private RelayTunnel tunnel; // protected both by "this" and "getCurrentTunnelLock"
     private boolean first = true; // protected by "getCurrentTunnelLock"
     private long lastFailureTimestamp; // protected by "this"
 
     public RelayTunnelProvider(VpnService vpnService, RelayTunnelListener listener) {
-        this(vpnService, listener, null, 0);
+        this(vpnService, listener, null, 0, 0);
     }
 
     public RelayTunnelProvider(VpnService vpnService, RelayTunnelListener listener,
-                               String relayHost, int relayPort) {
+                               String relayHost, int relayPort, long sessionToken) {
         this.vpnService = vpnService;
         this.listener = listener;
         this.relayHost = relayHost;
         this.relayPort = relayPort;
+        this.sessionToken = sessionToken;
     }
 
     public RelayTunnel getCurrentTunnel() throws IOException, InterruptedException {
@@ -70,7 +72,7 @@ public class RelayTunnelProvider {
                 waitUntilNextAttemptSlot();
 
                 // "tunnel" has not changed during waiting (only getCurrentTunnel() may write it)
-                tunnel = RelayTunnel.open(vpnService, relayHost, relayPort);
+                tunnel = RelayTunnel.open(vpnService, relayHost, relayPort, sessionToken);
             }
 
             // the first connection must either notify "connected" or "disconnected"

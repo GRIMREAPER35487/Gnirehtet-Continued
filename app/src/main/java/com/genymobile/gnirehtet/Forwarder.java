@@ -28,6 +28,7 @@ import java.io.InterruptedIOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.security.SecureRandom;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -59,7 +60,22 @@ public class Forwarder {
                      String relayHost, int relayPort) {
         this.vpnFileDescriptor = vpnFileDescriptor;
         this.listener = listener;
-        tunnel = new PersistentRelayTunnel(vpnService, listener, relayHost, relayPort);
+        tunnel = new PersistentRelayTunnel(vpnService, listener, relayHost, relayPort, createSessionToken());
+    }
+
+    /**
+     * Create a random token identifying this VPN session, so that the relay can resume its connections if the tunnel
+     * is lost and reconnected.
+     *
+     * @return a non-zero token
+     */
+    private static long createSessionToken() {
+        SecureRandom random = new SecureRandom();
+        long token;
+        do {
+            token = random.nextLong();
+        } while (token == 0);
+        return token;
     }
 
     private void onForwardingThreadEnded() {

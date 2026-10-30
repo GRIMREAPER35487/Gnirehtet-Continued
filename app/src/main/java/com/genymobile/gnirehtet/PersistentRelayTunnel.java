@@ -33,13 +33,17 @@ public class PersistentRelayTunnel implements Tunnel {
     private final RelayTunnelProvider provider;
     private final AtomicBoolean stopped = new AtomicBoolean();
 
+    // accessed only by the receiving thread
+    private Tunnel lastReceiveTunnel;
+    private boolean receiveStreamChanged;
+
     public PersistentRelayTunnel(VpnService vpnService, RelayTunnelListener listener) {
-        this(vpnService, listener, null, 0);
+        this(vpnService, listener, null, 0, 0);
     }
 
     public PersistentRelayTunnel(VpnService vpnService, RelayTunnelListener listener,
-                                 String relayHost, int relayPort) {
-        provider = new RelayTunnelProvider(vpnService, listener, relayHost, relayPort);
+                                 String relayHost, int relayPort, long sessionToken) {
+        provider = new RelayTunnelProvider(vpnService, listener, relayHost, relayPort, sessionToken);
     }
 
     @Override
@@ -66,6 +70,11 @@ public class PersistentRelayTunnel implements Tunnel {
             Tunnel tunnel = null;
             try {
                 tunnel = provider.getCurrentTunnel();
+                if (tunnel != lastReceiveTunnel) {
+                    // new connection: it starts at a packet boundary
+                    receiveStreamChanged = lastReceiveTunnel != null;
+                    lastReceiveTunnel = tunnel;
+                }
                 int r = tunnel.receiveTo(buffer, offset, maxLen);
                 if (r == -1) {
                     Log.d(TAG, "Tunnel read EOF");
@@ -81,6 +90,13 @@ public class PersistentRelayTunnel implements Tunnel {
             }
         }
         throw new InterruptedIOException("Persistent tunnel stopped");
+    }
+
+    @Override
+    public boolean takeReceiveStreamChanged() {
+        boolean changed = receiveStreamChanged;
+        receiveStreamChanged = false;
+        return changed;
     }
 
     @Override

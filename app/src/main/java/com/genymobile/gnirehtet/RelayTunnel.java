@@ -39,25 +39,37 @@ public final class RelayTunnel implements Tunnel {
     private final VpnService vpnService;
     private final String relayHost;
     private final int relayPort;
+    private final long sessionToken;
 
     private LocalSocket localSocket;
     private Socket tcpSocket;
     private InputStream inputStream;
     private OutputStream outputStream;
 
-    private RelayTunnel(VpnService vpnService, String relayHost, int relayPort) {
+    private RelayTunnel(VpnService vpnService, String relayHost, int relayPort, long sessionToken) {
         this.vpnService = vpnService;
         this.relayHost = relayHost;
         this.relayPort = relayPort;
+        this.sessionToken = sessionToken;
     }
 
     public static RelayTunnel open(VpnService vpnService) throws IOException {
-        return open(vpnService, null, 0);
+        return open(vpnService, null, 0, 0);
     }
 
-    public static RelayTunnel open(VpnService vpnService, String relayHost, int relayPort) throws IOException {
+    /**
+     * Open a tunnel to the relay.
+     *
+     * @param vpnService the VPN service
+     * @param relayHost the relay host (null for the adb reverse socket)
+     * @param relayPort the relay port
+     * @param sessionToken the VPN session token announced to the relay (0 for none), see {@link SessionPacket}
+     * @return the tunnel (not connected yet)
+     * @throws IOException if an I/O error occurs
+     */
+    public static RelayTunnel open(VpnService vpnService, String relayHost, int relayPort, long sessionToken) throws IOException {
         Log.d(TAG, "Opening a new relay tunnel (host=" + relayHost + ", port=" + relayPort + ")...");
-        return new RelayTunnel(vpnService, relayHost, relayPort);
+        return new RelayTunnel(vpnService, relayHost, relayPort, sessionToken);
     }
 
     public void connect() throws IOException {
@@ -83,6 +95,11 @@ public final class RelayTunnel implements Tunnel {
             outputStream = localSocket.getOutputStream();
         }
         readClientId(inputStream);
+        if (sessionToken != 0) {
+            // let the relay resume the connections of this VPN session if the tunnel was lost
+            byte[] sessionPacket = SessionPacket.create(sessionToken);
+            outputStream.write(sessionPacket, 0, sessionPacket.length);
+        }
     }
 
     /**
@@ -112,6 +129,12 @@ public final class RelayTunnel implements Tunnel {
             Log.v(TAG, "Receiving packet: " + r + " bytes");
         }
         return r;
+    }
+
+    @Override
+    public boolean takeReceiveStreamChanged() {
+        // a RelayTunnel is a single connection
+        return false;
     }
 
     @Override

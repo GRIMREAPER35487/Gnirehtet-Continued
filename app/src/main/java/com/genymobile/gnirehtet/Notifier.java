@@ -70,6 +70,13 @@ public class Notifier {
         context.startForeground(NOTIFICATION_ID, createNotification(false));
     }
 
+    /**
+     * Post the current notification as foreground notification again (keeps the failure state).
+     */
+    public void ensureForeground() {
+        context.startForeground(NOTIFICATION_ID, createNotification(failure));
+    }
+
     public void stop() {
         context.stopForeground(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

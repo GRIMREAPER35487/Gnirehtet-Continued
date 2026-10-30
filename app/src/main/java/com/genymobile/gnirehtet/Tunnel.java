@@ -28,4 +28,12 @@ public interface Tunnel {
 
     // blocking
     void close();
+
+    /**
+     * Indicate whether the data received since the last call come from a new underlying connection (the data buffered
+     * from the previous connection, like a partial packet, must then be discarded). Resets the flag.
+     *
+     * @return {@code true} if the receiving stream changed
+     */
+    boolean takeReceiveStreamChanged();
 }
