@@ -58,6 +58,14 @@ public class StreamBuffer {
         return capacity() - size();
     }
 
+    /**
+     * Discard all the buffered data.
+     */
+    public void clear() {
+        head = 0;
+        tail = 0;
+    }
+
     public int writeTo(WritableByteChannel channel) throws IOException {
         if (head > tail) {
             wrapper.limit(head).position(tail);

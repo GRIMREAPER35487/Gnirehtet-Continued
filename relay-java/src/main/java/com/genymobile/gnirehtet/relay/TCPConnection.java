@@ -21,6 +21,7 @@ import java.net.StandardSocketOptions;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Random;
@@ -40,6 +41,12 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     private static final int CONTROL_PACKET_BUFFER_SIZE = 128;
     // maximum number of control packets kept while the client buffer is full
     private static final int MAX_PENDING_CONTROL_PACKETS = 64;
+
+    // unacknowledged data kept to be sent again after a tunnel reconnection (the client window is at most 64KB, since
+    // window scaling is never negotiated: the TCP options are removed)
+    private static final int RETRANSMISSION_BUFFER_SIZE = 2 * IPv4Packet.MAX_PACKET_LENGTH;
+    // IPv4 header (with options) + TCP header (without options) + payload
+    private static final int RESEND_PACKET_BUFFER_SIZE = 60 + 20 + MAX_PAYLOAD_SIZE;
 
     // half-open connections (waiting for an ACK from the client) expire if nothing happens
     static final long HALF_OPEN_IDLE_TIMEOUT = 60 * 1000;
@@ -73,6 +80,9 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
     private final Packetizer controlToClient;
     // empty packets that could not be sent immediately, to be sent after packetForClient
     private final Deque<IPv4Packet> pendingControlPackets = new ArrayDeque<>();
+    // packets to send again after the client reconnected, before anything else
+    private final Deque<IPv4Packet> resendPackets = new ArrayDeque<>();
+    private final RetransmissionBuffer retransmissionBuffer = new RetransmissionBuffer(RETRANSMISSION_BUFFER_SIZE);
     private long lastActivity = System.currentTimeMillis();
 
     private final SocketChannel channel;
@@ -285,6 +295,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
         clientWindow = tcpHeader.getWindow();
         theirAcknowledgementNumber = tcpHeader.getAcknowledgementNumber();
+        retransmissionBuffer.acknowledge(theirAcknowledgementNumber);
 
         logd(TAG, "Receiving expected paquet " + packetSequenceNumber + " (flags = " + tcpHeader.getFlags() + ")");
 
@@ -447,6 +458,51 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         logd(TAG, "State = " + state);
         sendEmptyPacketToClient(TCPHeader.FLAG_SYN | TCPHeader.FLAG_ACK);
         ++sequenceNumber; // SYN counts for 1 byte
+        retransmissionBuffer.reset(sequenceNumber);
+    }
+
+    @Override
+    public void onClientResumed() {
+        if (state == null) {
+            return;
+        }
+        // The packets sent through the previous tunnel connection may have been lost (the tunnel is normally reliable,
+        // so the client will not ask for them): send again everything the client has not acknowledged yet.
+        resendPackets.clear();
+        if (state == State.SYN_RECEIVED) {
+            resendPackets.add(copyOf(createEmptyResponsePacket(TCPHeader.FLAG_SYN | TCPHeader.FLAG_ACK, sequenceNumber - 1)));
+        }
+        int size = retransmissionBuffer.size();
+        if (retransmissionBuffer.hasOverflowed()) {
+            logw(TAG, "Unacknowledged data could not be kept, they cannot be sent again");
+            size = 0;
+        }
+        if (size > 0) {
+            Packetizer packetizer = new Packetizer(controlToClient.getResponseIPv4Header(), controlToClient.getResponseTransportHeader(),
+                    RESEND_PACKET_BUFFER_SIZE);
+            TCPHeader tcpHeader = (TCPHeader) packetizer.getResponseTransportHeader();
+            for (int offset = 0; offset < size; offset += MAX_PAYLOAD_SIZE) {
+                int length = Math.min(MAX_PAYLOAD_SIZE, size - offset);
+                tcpHeader.setFlags(TCPHeader.FLAG_ACK | TCPHeader.FLAG_PSH);
+                tcpHeader.setSequenceNumber(retransmissionBuffer.getBase() + offset);
+                tcpHeader.setAcknowledgementNumber(acknowledgementNumber);
+                resendPackets.add(copyOf(packetizer.packetize(retransmissionBuffer.copy(offset, length))));
+            }
+        }
+        if (finSequenceNumber != null && (state == State.FIN_WAIT_1 || state == State.CLOSING || state == State.LAST_ACK)) {
+            // our FIN has not been acknowledged
+            resendPackets.add(copyOf(createEmptyResponsePacket(TCPHeader.FLAG_FIN | TCPHeader.FLAG_ACK, finSequenceNumber)));
+        }
+        if (resendPackets.isEmpty()) {
+            // nothing lost on our side, but tell the client our state, so that it sends again what we did not receive
+            resendPackets.add(copyOf(createEmptyResponsePacket(TCPHeader.FLAG_ACK, sequenceNumber)));
+        }
+        logd(TAG, "Client resumed, sending again " + size + " unacknowledged bytes " + numbers());
+        consume(this);
+    }
+
+    private static IPv4Packet copyOf(IPv4Packet packet) {
+        return new IPv4Packet(Binary.copy(packet.getRaw()));
     }
 
     private void resetConnection() {
@@ -478,7 +534,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     private void sendEmptyPacketToClient(int flags, int seq) {
         IPv4Packet packet = createEmptyResponsePacket(flags, seq);
-        if (packetForClient == null && pendingControlPackets.isEmpty() && sendToClient(packet)) {
+        if (packetForClient == null && pendingControlPackets.isEmpty() && resendPackets.isEmpty() && sendToClient(packet)) {
             return;
         }
         // keep the order with the pending packets, and never lose a control packet if the client buffer is full
@@ -516,7 +572,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         if (!state.isConnected() || state.isClosed()) {
             return false;
         }
-        if (packetForClient != null || !pendingControlPackets.isEmpty()) {
+        if (packetForClient != null || !pendingControlPackets.isEmpty() || !resendPackets.isEmpty()) {
             // a packet is already pending
             return false;
         }
@@ -537,6 +593,10 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     @Override
     public IPv4Packet get() {
+        if (!resendPackets.isEmpty()) {
+            // packets lost with the previous tunnel connection come first
+            return resendPackets.peekFirst();
+        }
         if (packetForClient != null) {
             // TODO update only when necessary
             updateAcknowledgementNumber(packetForClient);
@@ -554,6 +614,11 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
 
     @Override
     public void next() {
+        if (!resendPackets.isEmpty()) {
+            resendPackets.pollFirst();
+            updateInterests();
+            return;
+        }
         if (packetForClient == null) {
             IPv4Packet control = pendingControlPackets.pollFirst();
             assert control != null : "next() called without any pending packet";
@@ -565,6 +630,7 @@ public class TCPConnection extends AbstractConnection implements PacketSource {
         if (Log.isVerboseEnabled()) {
             logv(TAG, Binary.buildPacketString(packetForClient.getRaw()));
         }
+        retransmissionBuffer.append(packetForClient.getPayload());
         sequenceNumber += packetForClient.getPayloadLength();
         packetForClient = null;
         updateInterests();

@@ -133,7 +133,12 @@ public class UDPConnection extends AbstractConnection {
 
     private void pushToClient(IPv4Packet packet) {
         if (!sendToClient(packet)) {
-            logw(TAG, "Cannot send to client, dropping packet");
+            if (isClientAttached()) {
+                logw(TAG, "Cannot send to client, dropping packet");
+            } else {
+                // the device is reconnecting: datagrams are lost meanwhile (do not flood the logs)
+                logd(TAG, "Client detached, dropping packet");
+            }
             return;
         }
         logd(TAG, "Packet (" + packet.getPayloadLength() + " bytes) sent to client");

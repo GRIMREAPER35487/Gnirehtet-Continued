@@ -22,4 +22,11 @@ public interface Connection {
     void sendToNetwork(IPv4Packet packet);
     void disconnect();
     boolean isExpired();
+
+    /**
+     * Called when the client reconnected after losing its tunnel connection (packets sent meanwhile may have been lost).
+     */
+    default void onClientResumed() {
+        // nothing to do by default
+    }
 }

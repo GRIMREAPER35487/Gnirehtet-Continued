@@ -76,6 +76,19 @@ public class Packetizer {
         return inflate();
     }
 
+    /**
+     * Create a packet containing (a copy of) the given payload.
+     *
+     * @param payload the payload (consumed)
+     * @return the packet (sharing the packetizer buffer)
+     */
+    public IPv4Packet packetize(ByteBuffer payload) {
+        payloadBuffer.limit(payload.remaining()).position(0);
+        payloadBuffer.put(payload);
+        payloadBuffer.flip();
+        return inflate();
+    }
+
     public IPv4Packet packetize(ReadableByteChannel channel) throws IOException {
         return packetize(channel, payloadBuffer.capacity());
     }

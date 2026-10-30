@@ -26,19 +26,48 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
+/**
+ * A device connected to the relay.
+ * <p>
+ * If the device app announced a session token (see {@link SessionPacket}), losing the tunnel connection does not close
+ * the client: it is <em>detached</em>, and its network connections are kept for {@link #RESUME_TIMEOUT_MS}, so that the
+ * app can reconnect and resume them (the connections of the apps on the device then survive the reconnection).
+ */
 public class Client {
 
     private static final String TAG = Client.class.getSimpleName();
 
+    /**
+     * How long the connections of a detached client are kept, waiting for the device to reconnect.
+     */
+    public static final long RESUME_TIMEOUT_MS = 60 * 1000;
+
+    /**
+     * Notified of the session events of a client.
+     */
+    public interface SessionManager {
+        /**
+         * Called when a client announces its session token.
+         *
+         * @param client the client
+         * @param token the session token
+         * @return {@code true} if the tunnel connection of {@code client} has been handed over to another client
+         * (resumed session), in which case {@code client} must not be used anymore
+         */
+        boolean onSessionToken(Client client, long token);
+    }
+
     private static int nextId = 0;
 
-    private final int id;
-    private final SocketChannel clientChannel;
-    private final SelectionKey selectionKey;
+    private int id;
+    private SocketChannel clientChannel; // null while detached
+    private SelectionKey selectionKey; // null while detached
+    private final SelectionHandler selectionHandler;
     private final CloseListener<Client> closeListener;
+    private final SessionManager sessionManager;
     private int interests;
 
-    private final IPv4PacketBuffer clientToNetwork = new IPv4PacketBuffer();
+    private IPv4PacketBuffer clientToNetwork = new IPv4PacketBuffer();
     private final StreamBuffer networkToClient = new StreamBuffer(64 * IPv4Packet.MAX_PACKET_LENGTH);
     private final Router router;
 
@@ -47,28 +76,38 @@ public class Client {
     // store the remaining bytes of "id" to send to the client before relaying any data
     private ByteBuffer pendingIdBuffer;
 
+    private long sessionToken; // 0 if the app did not announce any session (its connections die with the tunnel)
+    private long detachedSince = -1; // -1 while attached
+    private boolean handedOver; // the tunnel connection now belongs to another client (resumed session)
+    private boolean closed;
+
     public Client(Selector selector, SocketChannel clientChannel, CloseListener<Client> closeListener) throws ClosedChannelException {
+        this(selector, clientChannel, closeListener, null);
+    }
+
+    public Client(Selector selector, SocketChannel clientChannel, CloseListener<Client> closeListener, SessionManager sessionManager)
+            throws ClosedChannelException {
         id = nextId++;
         this.clientChannel = clientChannel;
+        this.closeListener = closeListener;
+        this.sessionManager = sessionManager;
         router = new Router(this, selector);
         pendingIdBuffer = createIntBuffer(id);
 
-        SelectionHandler selectionHandler = (selectionKey) -> {
+        selectionHandler = (selectionKey) -> {
             if (selectionKey.isValid() && selectionKey.isWritable()) {
                 processSend();
             }
-            if (selectionKey.isValid() && selectionKey.isReadable()) {
+            if (isAttached() && selectionKey.isValid() && selectionKey.isReadable()) {
                 processReceive();
             }
-            if (selectionKey.isValid()) {
+            if (isAttached() && selectionKey.isValid()) {
                 updateInterests();
             }
         };
         // on start, we are interested only in writing (we must first send the client id)
         interests = SelectionKey.OP_WRITE;
         selectionKey = clientChannel.register(selector, interests, selectionHandler);
-
-        this.closeListener = closeListener;
     }
 
     private static ByteBuffer createIntBuffer(int value) {
@@ -87,11 +126,37 @@ public class Client {
         return router;
     }
 
+    public long getSessionToken() {
+        return sessionToken;
+    }
+
+    void setSessionToken(long sessionToken) {
+        this.sessionToken = sessionToken;
+    }
+
+    /**
+     * Indicate whether the client currently has a tunnel connection.
+     *
+     * @return {@code true} if attached
+     */
+    public boolean isAttached() {
+        return clientChannel != null && !handedOver && !closed;
+    }
+
+    /**
+     * Indicate whether this client has been detached for too long to be resumed.
+     *
+     * @return {@code true} if the client must be closed
+     */
+    public boolean isResumeExpired() {
+        return detachedSince != -1 && System.currentTimeMillis() >= detachedSince + RESUME_TIMEOUT_MS;
+    }
+
     private String closeReason = "Unknown reason";
 
     private void processReceive() {
         if (!read()) {
-            close(closeReason);
+            onTunnelLost(closeReason);
             return;
         }
         pushToNetwork();
@@ -100,12 +165,12 @@ public class Client {
     private void processSend() {
         if (mustSendId()) {
             if (!sendId()) {
-                close(closeReason);
+                onTunnelLost(closeReason);
             }
             return;
         }
         if (!write()) {
-            close(closeReason);
+            onTunnelLost(closeReason);
             return;
         }
         processPending();
@@ -174,27 +239,117 @@ public class Client {
 
     private void pushToNetwork() {
         IPv4Packet packet;
-        while ((packet = clientToNetwork.asIPv4Packet()) != null) {
+        while (isAttached() && (packet = clientToNetwork.asIPv4Packet()) != null) {
+            long token = SessionPacket.readToken(packet);
+            if (token != 0) {
+                clientToNetwork.next();
+                if (sessionManager != null && sessionManager.onSessionToken(this, token)) {
+                    // the session has been resumed by another client, which now handles this tunnel connection
+                    return;
+                }
+                continue;
+            }
             router.sendToNetwork(packet);
             clientToNetwork.next();
         }
     }
 
-    private void close(String reason) {
-        Log.i(TAG, "Client #" + id + " connection dropped. Reason: " + reason);
-        selectionKey.cancel();
-        try {
-            clientChannel.close();
-        } catch (IOException e) {
-            Log.e(TAG, "Cannot close client connection", e);
+    private void onTunnelLost(String reason) {
+        if (sessionToken == 0 || sessionManager == null) {
+            // no session to resume (app without session support)
+            close(reason);
+            return;
         }
+        // the "disconnected" wording is parsed by the watchdog
+        Log.i(TAG, "Client #" + id + " disconnected (" + reason + "); keeping its connections for " + RESUME_TIMEOUT_MS / 1000
+                + "s, waiting for the device to reconnect");
+        detachChannel();
+        detachedSince = System.currentTimeMillis();
+    }
+
+    /**
+     * Release the current tunnel connection, but keep the network connections.
+     */
+    private void detachChannel() {
+        if (selectionKey != null) {
+            selectionKey.cancel();
+            selectionKey = null;
+        }
+        if (clientChannel != null) {
+            try {
+                clientChannel.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Cannot close client connection", e);
+            }
+            clientChannel = null;
+        }
+        // The stream state is tied to the tunnel connection: drop the partial packet received, and the data not written
+        // yet (it may start in the middle of a packet). TCP data are sent again on resume (see TCPConnection).
+        clientToNetwork = new IPv4PacketBuffer();
+        networkToClient.clear();
+        pendingIdBuffer = null;
+    }
+
+    /**
+     * Take over the tunnel connection of {@code newClient}, which announced the session token of this client.
+     *
+     * @param newClient the client owning the new tunnel connection
+     */
+    void resume(Client newClient) {
+        if (clientChannel != null) {
+            // the previous tunnel connection is still open on our side, but the device opened a new one
+            Log.i(TAG, "Client #" + id + " disconnected (replaced by a new tunnel connection)");
+            detachChannel();
+        }
+        Log.i(TAG, "Client #" + newClient.id + " resumed the session of client #" + id + " (" + router.size() + " connections)");
+
+        clientChannel = newClient.clientChannel;
+        selectionKey = newClient.selectionKey;
+        clientToNetwork = newClient.clientToNetwork; // may contain packets received after the session token
+        pendingIdBuffer = null; // already sent by newClient
+        newClient.handedOver = true;
+        newClient.clientChannel = null;
+        newClient.selectionKey = null;
+
+        // from now on, this session is known by the id of its current tunnel connection (logs, watchdog)
+        id = newClient.id;
+        detachedSince = -1;
+        selectionKey.attach(selectionHandler);
+        interests = -1; // force the update
+
+        // send again what may have been lost with the previous tunnel connection
+        router.onClientResumed();
+        processPending();
+        pushToNetwork();
+        if (isAttached()) {
+            updateInterests();
+        }
+    }
+
+    /**
+     * Close the client and all its connections.
+     *
+     * @param reason the reason, for logging
+     */
+    public void close(String reason) {
+        if (closed) {
+            return;
+        }
+        Log.i(TAG, "Client #" + id + " connection dropped. Reason: " + reason);
+        if (clientChannel != null) {
+            detachChannel();
+        }
+        closed = true;
         router.clear();
         closeListener.onClosed(this);
     }
 
     private void updateInterests() {
+        if (!isAttached()) {
+            return;
+        }
         int interestOps = SelectionKey.OP_READ; // we always want to read
-        if (!networkToClient.isEmpty()) {
+        if (!networkToClient.isEmpty() || mustSendId()) {
             interestOps |= SelectionKey.OP_WRITE;
         }
         if (interests != interestOps) {
@@ -205,6 +360,10 @@ public class Client {
     }
 
     public boolean sendToClient(IPv4Packet packet) {
+        if (!isAttached()) {
+            // no tunnel connection: the connections keep their packets until the client is resumed
+            return false;
+        }
         if (networkToClient.remaining() < packet.getRawLength()) {
             Log.w(TAG, "Client buffer full");
             return false;
@@ -258,7 +417,9 @@ public class Client {
                 Log.d(TAG, "Pending packets sent to client");
                 iterator.remove();
             } else {
-                Log.w(TAG, "Pending packets not all sent to client, client buffer full again");
+                if (isAttached()) {
+                    Log.w(TAG, "Pending packets not all sent to client, client buffer full again");
+                }
                 return;
             }
         }

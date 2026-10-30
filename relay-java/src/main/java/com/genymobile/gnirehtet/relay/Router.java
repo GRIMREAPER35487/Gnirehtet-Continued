@@ -77,6 +77,16 @@ public class Router {
         return connections.get(id);
     }
 
+    public int size() {
+        return connections.size();
+    }
+
+    public void onClientResumed() {
+        for (Connection connection : connections.values()) {
+            connection.onClientResumed();
+        }
+    }
+
     public void clear() {
         for (Connection connection : connections.values()) {
             connection.disconnect();

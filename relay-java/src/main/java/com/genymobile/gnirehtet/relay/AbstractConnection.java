@@ -45,6 +45,10 @@ public abstract class AbstractConnection implements Connection {
         client.consume(source);
     }
 
+    protected boolean isClientAttached() {
+        return client.isAttached();
+    }
+
     protected boolean sendToClient(IPv4Packet packet) {
         return client.sendToClient(packet);
     }

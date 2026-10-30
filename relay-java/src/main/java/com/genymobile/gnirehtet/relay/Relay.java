@@ -25,7 +25,8 @@ public class Relay {
 
     private static final String TAG = Relay.class.getSimpleName();
 
-    private static final int CLEANING_INTERVAL = 60 * 1000;
+    // also bounds how long a detached client may outlive Client.RESUME_TIMEOUT_MS
+    private static final int CLEANING_INTERVAL = 10 * 1000;
 
     public interface RelayListener {
         void onClientDisconnected();
@@ -51,7 +52,7 @@ public class Relay {
 
         Log.i(TAG, "Relay server started");
 
-        long nextCleaningDeadline = System.currentTimeMillis() + UDPConnection.IDLE_TIMEOUT;
+        long nextCleaningDeadline = System.currentTimeMillis() + CLEANING_INTERVAL;
         while (true) {
             long timeout = Math.max(0, nextCleaningDeadline - System.currentTimeMillis());
             selector.select(timeout);
