@@ -708,6 +708,9 @@ class GnirehtetSupervisor:
         self.health_failures = 0
         self.health_unknown_since: Optional[float] = None
         self.last_health_check = 0.0
+        # the headset app is restarted only when keeping its running VPN did not help
+        self.force_app_restart = False
+        self.relay_soft_repair_done = False
         self.device_missing_since: Optional[float] = None
 
     def run_adb(self, args: List[str], timeout: float = ADB_TIMEOUT_SEC, merge_output: bool = False) -> Tuple[int, str]:
@@ -1025,6 +1028,7 @@ class GnirehtetSupervisor:
             if m.group(2) == "connected":
                 self.relay_clients.add(m.group(1))
                 self.relay_no_client_since = None
+                self.relay_soft_repair_done = False
             else:
                 self.relay_clients.discard(m.group(1))
                 if not self.relay_clients and self.relay_no_client_since is None:
@@ -1119,8 +1123,14 @@ class GnirehtetSupervisor:
         log_info(f"Device connected: [{serial}]. Configuring tether...")
 
         # 1. Stop any stale VPN instance (ensures no VpnService swallows the native hardware link).
+        # Keep a running VPN in the default mode: restarting the app would kill every connection going through it
+        # (e.g. Virtual Desktop), while the app reconnects to the relay by itself and the relay resumes its connections.
         # On quick retries, keep the app alive so a pending VPN permission prompt is not killed every cycle.
-        if self.setup_failures % 3 == 0:
+        keep_vpn = not self.native and not self.force_app_restart and self.is_vpn_up(serial)
+        self.force_app_restart = False
+        if keep_vpn:
+            log_info(f"The VPN is still up on [{serial}]: keeping it, so open connections survive.")
+        elif self.setup_failures % 3 == 0:
             self.run_adb(["-s", serial, "shell", "am", "force-stop", "com.genymobile.gnirehtet"])
 
         # 2. Determine transport mode: Standard ADB reverse (default) vs Native USB (experimental)
@@ -1156,6 +1166,10 @@ class GnirehtetSupervisor:
             if code != 0:
                 log_error(f"Failed to set adb reverse: {out}")
                 return False
+
+            if keep_vpn and self.is_vpn_up(serial):
+                log_success(f"Tether active and running on [{serial}] via Legacy ADB Reverse (VPN kept)!")
+                return True
 
             # Start VPN intent on Android
             intent_cmd = [
@@ -1340,10 +1354,20 @@ class GnirehtetSupervisor:
                         time.sleep(1.0)
                         continue
                     if not self.active_native_mode and self.relay_has_lost_client():
-                        log_warn(f"No device connected to the relay for {RELAY_NO_CLIENT_TIMEOUT_SEC:.0f}s. Restarting the tether...")
-                        self.handle_disconnect()
-                        time.sleep(1.0)
-                        continue
+                        if not self.relay_soft_repair_done:
+                            # the headset app reconnects by itself: restore the tunnel first, without restarting it
+                            log_warn(f"No device connected to the relay for {RELAY_NO_CLIENT_TIMEOUT_SEC:.0f}s. Restoring the adb reverse tunnel...")
+                            self.run_adb(["-s", chosen_serial, "reverse", "localabstract:gnirehtet", f"tcp:{self.port}"])
+                            self.relay_soft_repair_done = True
+                            with self.relay_clients_lock:
+                                self.relay_no_client_since = time.time()
+                        else:
+                            log_warn("Still no device connected to the relay. Restarting the headset app...")
+                            self.relay_soft_repair_done = False
+                            self.force_app_restart = True
+                            self.handle_disconnect()
+                            time.sleep(1.0)
+                            continue
 
                 time.sleep(self.poll_interval)
 
