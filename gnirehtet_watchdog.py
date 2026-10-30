@@ -61,6 +61,20 @@ VPN_START_TIMEOUT_SEC = 15.0
 RELAY_NO_CLIENT_TIMEOUT_SEC = 20.0
 # Minimum delay between two "adb reconnect offline" attempts
 ADB_RECONNECT_INTERVAL_SEC = 10.0
+# Health checks: a restart of the tether kills every connection going through it (e.g. Virtual Desktop has
+# to be restarted), so only restart once the link is really dead, never on a single slow or failed check.
+HEALTH_CHECK_INTERVAL_SEC = 5.0
+# number of consecutive failed health checks before the tether is restarted
+HEALTH_FAILURES_BEFORE_RESTART = 3
+# adb may be too slow to answer while the USB link is busy (streaming): if no check could even be
+# performed for this long, count it as a failure
+HEALTH_UNKNOWN_GIVE_UP_SEC = 60.0
+# timeout of each adb command used by the health checks
+HEALTH_ADB_TIMEOUT_SEC = 8.0
+# the device may briefly disappear from "adb devices" (USB hiccup): wait this long before considering it gone
+DEVICE_MISSING_GRACE_SEC = 10.0
+# consecutive adb timeouts before restarting the adb server (only done while no tether is up)
+ADB_TIMEOUTS_BEFORE_REPAIR = 3
 RELAY_CLIENT_EVENT = re.compile(r"Client #(\d+) (connected|disconnected)")
 
 
@@ -691,6 +705,10 @@ class GnirehtetSupervisor:
         self.external_relay_reported = False
         self.native_failures = 0
         self.native_retry_at = 0.0
+        self.health_failures = 0
+        self.health_unknown_since: Optional[float] = None
+        self.last_health_check = 0.0
+        self.device_missing_since: Optional[float] = None
 
     def run_adb(self, args: List[str], timeout: float = ADB_TIMEOUT_SEC, merge_output: bool = False) -> Tuple[int, str]:
         """Runs an adb command with timeout protection against USB hangs.
@@ -711,8 +729,13 @@ class GnirehtetSupervisor:
         except subprocess.TimeoutExpired:
             self.adb_fail_count += 1
             log_warn(f"ADB command timed out ({timeout}s): {' '.join(cmd)}")
-            if self.adb_fail_count >= 2:
-                self.repair_adb()
+            if self.adb_fail_count >= ADB_TIMEOUTS_BEFORE_REPAIR:
+                if self.is_connected:
+                    # "adb kill-server" would drop the reverse tunnel, and every connection with it
+                    log_warn("ADB is slow to answer; not restarting it while the tether is up.")
+                    self.adb_fail_count = 0
+                else:
+                    self.repair_adb()
             return -1, "TIMEOUT"
         except Exception as e:
             return -1, str(e)
@@ -813,9 +836,11 @@ class GnirehtetSupervisor:
                 self.relay_process.kill()
         self.relay_process = None
 
-    def get_connected_devices(self) -> List[Tuple[str, str]]:
-        """Returns list of (serial, state) for connected devices."""
+    def get_connected_devices(self) -> Optional[List[Tuple[str, str]]]:
+        """Returns list of (serial, state) for connected devices, or None if adb did not answer."""
         code, out = self.run_adb(["devices"])
+        if code == -1:
+            return None
         if code != 0 or not out:
             return []
         devices = []
@@ -960,19 +985,36 @@ class GnirehtetSupervisor:
         else:
             return self.detect_relay_host_ip(serial)
 
-    def check_tunnel_health(self, serial: str) -> bool:
-        """Verifies if the tether connection is active and healthy."""
+    def check_tunnel_health(self, serial: str) -> Optional[bool]:
+        """Verifies if the tether connection is active and healthy.
+        Returns True if healthy, False if broken, None if it could not be determined (adb timed out)."""
+        t = HEALTH_ADB_TIMEOUT_SEC
         if self.active_native_mode:
-            code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"])
+            code, addr_out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr", "show", "usb0"], timeout=t)
+            if code == -1:
+                return None
             return code == 0 and "inet " in addr_out and not ("169.254." in addr_out)
-        else:
-            code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"])
-            if code != 0 or not out.strip():
-                return False
-            code, out = self.run_adb(["-s", serial, "reverse", "--list"])
-            if code != 0 or "localabstract:gnirehtet" not in out:
-                return False
-            return self.is_vpn_up(serial)
+
+        code, out = self.run_adb(["-s", serial, "shell", "pidof", "com.genymobile.gnirehtet"], timeout=t)
+        if code == -1:
+            return None
+        if code != 0 or not out.strip():
+            return False
+        code, out = self.run_adb(["-s", serial, "shell", "ip", "-o", "-4", "addr"], timeout=t)
+        if code == -1:
+            return None
+        if code != 0 or f"{VPN_CLIENT_ADDRESS}/" not in out:
+            return False
+        code, out = self.run_adb(["-s", serial, "reverse", "--list"], timeout=t)
+        if code == -1:
+            return None
+        if code != 0 or "localabstract:gnirehtet" not in out:
+            # the app and its VPN are fine, only the reverse rule is gone (e.g. adb reconnected):
+            # restore it in place instead of restarting the app, so existing connections survive
+            log_warn("adb reverse tunnel missing; restoring it...")
+            code, out = self.run_adb(["-s", serial, "reverse", "localabstract:gnirehtet", f"tcp:{self.port}"], timeout=t)
+            return code == 0
+        return True
 
     def track_relay_client(self, line: str):
         """Keeps track of the relay clients from the relay log ("Client #N connected/disconnected")."""
@@ -1165,8 +1207,34 @@ class GnirehtetSupervisor:
             self.dhcp_server.stop()
             self.dhcp_server = None
 
+    def health_check_says_dead(self, healthy: Optional[bool]) -> bool:
+        """Records a health check result; True once the tether must be restarted."""
+        now = time.time()
+        if healthy is True:
+            if self.health_failures:
+                log_success("Tether link recovered.")
+            self.health_failures = 0
+            self.health_unknown_since = None
+            return False
+        if healthy is None:
+            # adb did not answer in time: not a proof that the link is dead
+            if self.health_unknown_since is None:
+                self.health_unknown_since = now
+                log_warn("Health check inconclusive (adb is slow to answer); not restarting the tether.")
+            if now - self.health_unknown_since < HEALTH_UNKNOWN_GIVE_UP_SEC:
+                return False
+            self.health_unknown_since = now  # count one failure per give-up period
+        self.health_failures += 1
+        if self.health_failures < HEALTH_FAILURES_BEFORE_RESTART:
+            log_warn(f"Health check failed ({self.health_failures}/{HEALTH_FAILURES_BEFORE_RESTART}); checking again before restarting...")
+            return False
+        return True
+
     def handle_disconnect(self):
         """Handles link drop and state reset."""
+        self.health_failures = 0
+        self.health_unknown_since = None
+        self.last_health_check = time.time()
         self.setup_failures = 0
         if self.is_connected:
             log_warn("Device disconnected or cable wiggled! Auto-recovery active...")
@@ -1215,6 +1283,10 @@ class GnirehtetSupervisor:
 
                 # 2. Check connected devices
                 devices = self.get_connected_devices()
+                if devices is None:
+                    # adb did not answer (busy USB link): do not conclude anything
+                    time.sleep(self.poll_interval)
+                    continue
                 ready_devices = [s for s, state in devices if state == "device"]
                 unauth_devices = [s for s, state in devices if state == "unauthorized"]
 
@@ -1230,9 +1302,19 @@ class GnirehtetSupervisor:
                     chosen_serial = ready_devices[0] if ready_devices else None
 
                 if not chosen_serial:
+                    now = time.time()
+                    if self.is_connected:
+                        if self.device_missing_since is None:
+                            self.device_missing_since = now
+                        if now - self.device_missing_since < DEVICE_MISSING_GRACE_SEC:
+                            # brief USB hiccup: keep the tether state, the device may come back
+                            time.sleep(self.poll_interval)
+                            continue
+                    self.device_missing_since = None
                     self.handle_disconnect()
                     time.sleep(self.poll_interval)
                     continue
+                self.device_missing_since = None
 
                 # 3. Connection state management
                 if not self.is_connected or self.current_serial != chosen_serial:
@@ -1250,9 +1332,10 @@ class GnirehtetSupervisor:
                         continue
 
                 # 4. Active link health check
-                if self.is_connected:
-                    if not self.check_tunnel_health(chosen_serial):
-                        log_warn("Tether link degraded or disconnected. Re-establishing...")
+                if self.is_connected and time.time() - self.last_health_check >= HEALTH_CHECK_INTERVAL_SEC:
+                    self.last_health_check = time.time()
+                    if self.health_check_says_dead(self.check_tunnel_health(chosen_serial)):
+                        log_warn("Tether link is down. Re-establishing...")
                         self.handle_disconnect()
                         time.sleep(1.0)
                         continue
